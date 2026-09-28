@@ -55,6 +55,13 @@ func (s *Sampler) DecideTrace(t correlate.Trace) (bool, Reason) {
 // is sampled (parentSampled): such traces are always kept, reason "parent",
 // unless an error or slowness is the better reason.
 func (s *Sampler) DecideTraceParent(t correlate.Trace, parentSampled bool) (bool, Reason) {
+	return s.DecideTraceIdle(t, parentSampled, 0)
+}
+
+// DecideTraceIdle also treats an idle-in-transaction gap before the root query
+// as slowness: a client that held its server idle for at least the slow
+// threshold is as interesting as a slow query.
+func (s *Sampler) DecideTraceIdle(t correlate.Trace, parentSampled bool, idle time.Duration) (bool, Reason) {
 	var root pgwire.Query
 	failed := false
 	if t.Client != nil {
@@ -65,6 +72,9 @@ func (s *Sampler) DecideTraceParent(t correlate.Trace, parentSampled bool) (bool
 	}
 	for _, c := range t.Server {
 		failed = failed || c.Q.ErrorCode != ""
+	}
+	if idle >= s.slow && s.slow > 0 {
+		root.End = root.Start + uint64(max(idle, time.Duration(root.End-root.Start)))
 	}
 	return s.decide(failed, root, parentSampled)
 }

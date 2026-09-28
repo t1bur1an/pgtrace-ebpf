@@ -13,6 +13,8 @@ const pid = 7
 var (
 	C1 = event.ConnKey{PID: pid, FD: 101}
 	C2 = event.ConnKey{PID: pid, FD: 102}
+	C3 = event.ConnKey{PID: pid, FD: 103}
+	C4 = event.ConnKey{PID: pid, FD: 104}
 	S1 = event.ConnKey{PID: pid, FD: 201}
 	S2 = event.ConnKey{PID: pid, FD: 202}
 )
@@ -43,13 +45,29 @@ func done(s pgwire.Start, end uint64, tx byte) pgwire.Query {
 // query runs a whole client query forwarded to server s without interference.
 func (r *rec) query(c, s event.ConnKey, ts, sig uint64, tx byte) {
 	cs := st(c, ts, sig)
-	r.c.ClientRecv(pid, c, ts)
+	r.recv(c, ts)
 	r.c.ClientStarted(pid, c, cs)
 	ss := st(s, ts+1, sig)
-	r.c.ServerStarted(pid, s, ss)
+	r.serverStart(s, ss)
 	r.c.ServerDone(s, done(ss, ts+5, tx))
 	r.c.ClientDone(c, done(cs, ts+6, tx))
 }
+
+// recv / serverStart model pgbouncer's data events: each is one event in
+// pgbouncer's single-threaded loop.
+func (r *rec) recv(k event.ConnKey, ts uint64) {
+	r.c.Event(pid)
+	r.c.ClientRecv(pid, k, ts)
+}
+
+func (r *rec) serverStart(k event.ConnKey, s pgwire.Start) {
+	r.c.Event(pid)
+	r.c.ServerStarted(pid, k, s)
+}
+
+// reply models pgbouncer receiving a server's reply (an event that isn't a
+// client read).
+func (r *rec) reply() { r.c.Event(pid) }
 
 func (r *rec) last(t *testing.T) Trace {
 	t.Helper()
@@ -79,13 +97,13 @@ func TestPoolWait(t *testing.T) {
 	r := newRec()
 	// C1 holds S1 in a transaction; C2's query waits for a server.
 	c1 := st(C1, 10, 1)
-	r.c.ClientRecv(pid, C1, 10)
+	r.recv(C1, 10)
 	r.c.ClientStarted(pid, C1, c1)
 	s1 := st(S1, 11, 1)
-	r.c.ServerStarted(pid, S1, s1)
+	r.serverStart(S1, s1)
 
 	c2 := st(C2, 12, 2)
-	r.c.ClientRecv(pid, C2, 12)
+	r.recv(C2, 12)
 	r.c.ClientStarted(pid, C2, c2)
 
 	r.c.ServerDone(S1, done(s1, 20, 'I')) // S1 back in the pool
@@ -93,9 +111,9 @@ func TestPoolWait(t *testing.T) {
 	expectLinked(t, r.last(t), C1, S1, "exact")
 
 	// pgbouncer hands S1 to the waiting C2; the last client read was C2 long ago.
-	r.c.ClientRecv(pid, C1, 22)
+	r.recv(C1, 22)
 	s2 := st(S1, 23, 2)
-	r.c.ServerStarted(pid, S1, s2)
+	r.serverStart(S1, s2)
 	r.c.ServerDone(S1, done(s2, 30, 'I'))
 	r.c.ClientDone(C2, done(c2, 31, 'I'))
 	tr := r.last(t)
@@ -108,11 +126,11 @@ func TestPoolWait(t *testing.T) {
 func TestBindSigFallback(t *testing.T) {
 	r := newRec()
 	c := pgwire.Start{ID: 1, Sig: 11, BindSig: 99, SQLKnown: true, TS: 1}
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c)
 	// Server-side statement was prepared before the agent started.
 	s := pgwire.Start{ID: 1, Sig: 55, BindSig: 99, SQLKnown: false, TS: 2}
-	r.c.ServerStarted(pid, S1, s)
+	r.serverStart(S1, s)
 	r.c.ServerDone(S1, pgwire.Query{ID: 1, Start: 2, End: 3, TxStatus: 'I'})
 	r.c.ClientDone(C1, pgwire.Query{ID: 1, Start: 1, End: 4, TxStatus: 'I'})
 	expectLinked(t, r.last(t), C1, S1, "exact")
@@ -122,15 +140,15 @@ func TestSameSQLDifferentBinds(t *testing.T) {
 	r := newRec()
 	a := st(C1, 1, 100)
 	b := st(C2, 2, 200)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, a)
-	r.c.ClientRecv(pid, C2, 2)
+	r.recv(C2, 2)
 	r.c.ClientStarted(pid, C2, b)
 	// Forwarded in the opposite order to two servers.
 	sb := st(S1, 3, 200)
 	sa := st(S2, 4, 100)
-	r.c.ServerStarted(pid, S1, sb)
-	r.c.ServerStarted(pid, S2, sa)
+	r.serverStart(S1, sb)
+	r.serverStart(S2, sa)
 	r.c.ServerDone(S1, done(sb, 5, 'I'))
 	r.c.ServerDone(S2, done(sa, 6, 'I'))
 	r.c.ClientDone(C1, done(a, 7, 'I'))
@@ -143,18 +161,18 @@ func TestIdenticalSignaturesInferred(t *testing.T) {
 	r := newRec()
 	a := st(C1, 1, 5)
 	b := st(C2, 2, 5)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, a)
-	r.c.ClientRecv(pid, C2, 2)
+	r.recv(C2, 2)
 	r.c.ClientStarted(pid, C2, b)
 	s := st(S1, 3, 5) // last read was C2: pgbouncer forwarded C2 right after reading it
-	r.c.ServerStarted(pid, S1, s)
+	r.serverStart(S1, s)
 	r.c.ServerDone(S1, done(s, 4, 'I'))
 	r.c.ClientDone(C2, done(b, 5, 'I'))
 	expectLinked(t, r.last(t), C2, S1, "inferred")
 	// C1 is still queued, and is the only candidate for the next start.
 	s2 := st(S1, 6, 5)
-	r.c.ServerStarted(pid, S1, s2)
+	r.serverStart(S1, s2)
 	r.c.ServerDone(S1, done(s2, 7, 'I'))
 	r.c.ClientDone(C1, done(a, 8, 'I'))
 	expectLinked(t, r.last(t), C1, S1, "exact")
@@ -165,7 +183,7 @@ func TestTransactionKeepsLink(t *testing.T) {
 	r.query(C1, S1, 10, 1, 'T') // BEGIN
 	// Same statement text queued by C2 must not steal S1 while C1's transaction is open.
 	c2 := st(C2, 15, 2)
-	r.c.ClientRecv(pid, C2, 15)
+	r.recv(C2, 15)
 	r.c.ClientStarted(pid, C2, c2)
 	r.query(C1, S1, 20, 2, 'T')
 	expectLinked(t, r.last(t), C1, S1, "exact")
@@ -176,12 +194,12 @@ func TestTransactionKeepsLink(t *testing.T) {
 func TestInternalSetBeforeForward(t *testing.T) {
 	r := newRec()
 	c := st(C1, 1, 9)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c)
 	set := st(S1, 2, 777) // pgbouncer syncs a parameter first
-	r.c.ServerStarted(pid, S1, set)
+	r.serverStart(S1, set)
 	q := st(S1, 2, 9)
-	r.c.ServerStarted(pid, S1, q)
+	r.serverStart(S1, q)
 	r.c.ServerDone(S1, done(set, 3, 'I'))
 	r.c.ServerDone(S1, done(q, 4, 'I'))
 	r.c.ClientDone(C1, done(c, 5, 'I'))
@@ -194,7 +212,7 @@ func TestInternalSetBeforeForward(t *testing.T) {
 func TestAdminConsoleQueryDoesNotBlockQueue(t *testing.T) {
 	r := newRec()
 	c := st(C1, 1, 42)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c)
 	r.c.ClientDone(C1, done(c, 2, 'I')) // answered by pgbouncer itself
 	tr := r.last(t)
@@ -208,7 +226,7 @@ func TestAdminConsoleQueryDoesNotBlockQueue(t *testing.T) {
 func TestServerOnlyQuery(t *testing.T) {
 	r := newRec()
 	s := st(S1, 1, 1234) // server_check_query
-	r.c.ServerStarted(pid, S1, s)
+	r.serverStart(S1, s)
 	r.c.ServerDone(S1, done(s, 2, 'I'))
 	tr := r.last(t)
 	if tr.Client != nil || len(tr.Server) != 1 || tr.Server[0].Correlation != "none" {
@@ -219,10 +237,10 @@ func TestServerOnlyQuery(t *testing.T) {
 func TestClientClosesMidQuery(t *testing.T) {
 	r := newRec()
 	c := st(C1, 1, 5)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c)
 	s := st(S1, 2, 5)
-	r.c.ServerStarted(pid, S1, s)
+	r.serverStart(S1, s)
 	r.c.ServerDone(S1, done(s, 3, 'I'))
 	r.c.ClientClosed(C1)
 	tr := r.last(t)
@@ -234,10 +252,10 @@ func TestClientClosesMidQuery(t *testing.T) {
 	}
 	// Server finishing after its client is gone is an orphan too.
 	c2 := st(C2, 10, 6)
-	r.c.ClientRecv(pid, C2, 10)
+	r.recv(C2, 10)
 	r.c.ClientStarted(pid, C2, c2)
 	s2 := st(S2, 11, 6)
-	r.c.ServerStarted(pid, S2, s2)
+	r.serverStart(S2, s2)
 	r.c.ClientClosed(C2)
 	r.c.ServerDone(S2, done(s2, 12, 'I'))
 	if tr := r.last(t); tr.Client != nil || len(tr.Server) != 1 {
@@ -251,10 +269,10 @@ func TestClientClosesMidQuery(t *testing.T) {
 func TestHoldTimeout(t *testing.T) {
 	r := newRec()
 	c := st(C1, 1, 5)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c)
 	s := st(S1, 2, 5)
-	r.c.ServerStarted(pid, S1, s)
+	r.serverStart(S1, s)
 	r.c.ServerDone(S1, done(s, 3, 'I'))
 	r.c.Tick(3 + uint64(10*time.Second))
 	if len(r.traces) != 0 {
@@ -271,19 +289,19 @@ func TestStaleLinkRecovers(t *testing.T) {
 	// C1 is linked to S1 and the agent never sees S1 go idle (e.g. it attached
 	// mid-transaction or lost the ReadyForQuery).
 	c1 := st(C1, 1, 1)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, c1)
 	s1 := st(S1, 2, 1)
-	r.c.ServerStarted(pid, S1, s1)
+	r.serverStart(S1, s1)
 	r.c.ServerDone(S1, done(s1, 3, 'T'))
 	r.c.ClientDone(C1, done(c1, 4, 'T'))
 
 	// S1 is handed to C2; its query must go to C2, not be an internal child of C1.
 	c2 := st(C2, 10, 2)
-	r.c.ClientRecv(pid, C2, 10)
+	r.recv(C2, 10)
 	r.c.ClientStarted(pid, C2, c2)
 	s2 := st(S1, 11, 2)
-	r.c.ServerStarted(pid, S1, s2)
+	r.serverStart(S1, s2)
 	r.c.ServerDone(S1, done(s2, 12, 'I'))
 	r.c.ClientDone(C2, done(c2, 13, 'I'))
 	expectLinked(t, r.last(t), C2, S1, "exact")
@@ -296,10 +314,10 @@ func TestStateCleanedAfterLostQueries(t *testing.T) {
 	r := newRec()
 	// A client query whose server side never completes (parser lost its place).
 	lost := st(C1, 1, 1)
-	r.c.ClientRecv(pid, C1, 1)
+	r.recv(C1, 1)
 	r.c.ClientStarted(pid, C1, lost)
 	ls := st(S1, 2, 1)
-	r.c.ServerStarted(pid, S1, ls)
+	r.serverStart(S1, ls)
 	// ... and the client never saw its reply either. Later queries complete.
 	for i := uint64(0); i < 3; i++ {
 		r.query(C1, S1, 10+i*10, 100+i, 'I')
@@ -322,4 +340,42 @@ func TestStatsSafeForConcurrentReaders(t *testing.T) {
 		r.query(C1, S1, 10+i*10, 5000+i, 'I')
 	}
 	<-done
+}
+
+func TestPoolWaitIdenticalQueriesServedOldestFirst(t *testing.T) {
+	r := newRec()
+	// C1 runs on the only server; C2, C3 and C4 then queue the same query.
+	c1 := st(C1, 10, 7)
+	r.recv(C1, 10)
+	r.c.ClientStarted(pid, C1, c1)
+	s1 := st(S1, 11, 7)
+	r.serverStart(S1, s1)
+	var waiting []pgwire.Start
+	for i, k := range []event.ConnKey{C2, C3, C4} {
+		w := st(k, uint64(20+i), 7)
+		r.recv(k, uint64(20+i))
+		r.c.ClientStarted(pid, k, w)
+		waiting = append(waiting, w)
+	}
+	// S1 replies to C1, pgbouncer forwards the reply, then hands S1 to the
+	// oldest waiter. The last client read (C4) is NOT the one served.
+	r.reply()
+	r.c.ServerDone(S1, done(s1, 30, 'I'))
+	r.c.Event(pid) // pgbouncer sends the reply to C1
+	r.c.ClientDone(C1, done(c1, 31, 'I'))
+	for i, k := range []event.ConnKey{C2, C3, C4} {
+		s := st(S1, uint64(40+10*i), 7)
+		r.serverStart(S1, s)
+		r.reply()
+		r.c.ServerDone(S1, done(s, uint64(45+10*i), 'I'))
+		r.c.Event(pid)
+		r.c.ClientDone(k, done(waiting[i], uint64(46+10*i), 'I'))
+		tr := r.last(t)
+		if tr.Client == nil || tr.Client.Key != k || len(tr.Server) != 1 || tr.Server[0].Q.Start != s.TS {
+			t.Fatalf("waiter %d: got %+v", i+2, tr)
+		}
+	}
+	if st := r.c.Stats(); st["orphan"] != 0 {
+		t.Fatalf("stats %v", st)
+	}
 }

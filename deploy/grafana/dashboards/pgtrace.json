@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "time": {
     "from": "now-15m",
@@ -883,6 +883,379 @@
     },
     {
       "type": "row",
+      "title": "Contention",
+      "id": 29,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Lock and transaction conflicts/s",
+      "id": 30,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Errors postgres returned that indicate contention. The traces behind them are in the tables below and in Explore (tag db.response.status_code).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"40P01\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "deadlock (40P01)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"40001\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "serialization failure (40001)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"55P03\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "lock timeout (55P03)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"57014\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "statement timeout / cancel (57014)",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"25P03\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "idle-in-transaction timeout (25P03)",
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_query_errors_total{side=\"server\",sqlstate=\"53300\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "too many connections (53300)",
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pool wait vs server time (p95)",
+      "id": 31,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Pool wait high and server time normal: pgbouncer pool too small or held by idle transactions. Server time high: contention or slowness inside postgres.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pgtrace_pool_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "pool wait p95 (pgbouncer queue)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pgtrace_query_duration_seconds_bucket{side=\"server\"}[$__rate_interval])))",
+          "legendFormat": "server time p95 (postgres, incl. lock waits)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Idle in transaction (server held while idle)",
+      "id": 32,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Time clients spent inside an open transaction without sending anything; in transaction pooling the server connection is unavailable to others meanwhile. Traces: attribute pgbouncer.idle_in_tx_ms on the next query.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(pgtrace_idle_in_transaction_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pgtrace_idle_in_transaction_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(pgtrace_idle_in_transaction_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        },
+        {
+          "expr": "sum(rate(pgtrace_idle_in_transaction_seconds_count[$__rate_interval]))",
+          "legendFormat": "gaps/s",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gaps/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Connection errors/s",
+      "id": 33,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Errors with no query in flight: rejected logins (28P01 auth, 08P01 unknown database / pgbouncer limits, 53300 too many connections) and FATALs on idle sessions. Spans named 'connect'.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "targets": [
+        {
+          "expr": "sum by (side, sqlstate) (rate(pgtrace_connection_errors_total[$__rate_interval]))",
+          "legendFormat": "{{side}} {{sqlstate}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Deadlock traces",
+      "id": 34,
+      "datasource": {
+        "type": "jaeger",
+        "uid": "victoriatraces"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "jaeger",
+            "uid": "victoriatraces"
+          },
+          "queryType": "search",
+          "service": "pgbouncer",
+          "tags": "db.response.status_code=40P01",
+          "limit": 50
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Click a trace ID to open it."
+    },
+    {
+      "type": "row",
       "title": "Agent",
       "id": 20,
       "collapsed": false,
@@ -890,7 +1263,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 58
       },
       "panels": []
     },
@@ -907,7 +1280,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 42
+        "y": 59
       },
       "targets": [
         {
@@ -971,7 +1344,7 @@
         "h": 8,
         "w": 6,
         "x": 6,
-        "y": 42
+        "y": 59
       },
       "targets": [
         {
@@ -1025,7 +1398,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 42
+        "y": 59
       },
       "targets": [
         {
@@ -1089,7 +1462,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 42
+        "y": 59
       },
       "targets": [
         {
@@ -1149,7 +1522,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 67
       },
       "panels": []
     },
@@ -1166,7 +1539,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 51
+        "y": 68
       },
       "targets": [
         {
@@ -1202,7 +1575,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 51
+        "y": 68
       },
       "targets": [
         {
@@ -1239,7 +1612,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 51
+        "y": 68
       },
       "targets": [
         {

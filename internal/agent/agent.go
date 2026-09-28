@@ -162,6 +162,12 @@ func (a *Agent) drop(k event.ConnKey) {
 	}
 	switch c.side {
 	case connmap.SideClient:
+		// Queries that failed without a ReadyForQuery (pgbouncer errors
+		// followed by a disconnect) complete now.
+		for _, q := range c.p.Close() {
+			a.queries.Add(1)
+			a.cor.ClientDone(k, q)
+		}
 		a.cor.ClientClosed(k)
 	case connmap.SideServer:
 		a.cor.ServerClosed(k)
@@ -193,6 +199,7 @@ func (a *Agent) data(ev event.Data) {
 		a.count(c.side, 1)
 	}
 	pid := ev.Key.PID
+	a.cor.Event(pid)
 	if c.side == connmap.SideClient && ev.Dir == event.DirRecv {
 		a.cor.ClientRecv(pid, ev.Key, ev.TS)
 	}

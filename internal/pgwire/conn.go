@@ -270,6 +270,7 @@ func (c *Conn) backend(ts uint64, m msg, r *Result) {
 			break
 		}
 		q.ErrorCode, q.ErrorMessage = errorFields(m.body)
+		q.End = ts // provisional for simple queries; ReadyForQuery sets the final end
 		if !g.simple {
 			q.End = ts
 			g.next++
@@ -300,6 +301,23 @@ func (c *Conn) backend(ts uint64, m msg, r *Result) {
 			c.open = nil
 		}
 	}
+}
+
+// Close is called when the connection ends. It returns queries that received
+// an error but never a ReadyForQuery: pgbouncer answers some failures (e.g.
+// query_wait_timeout) with an error and then closes the connection.
+func (c *Conn) Close() []Query {
+	var out []Query
+	for _, g := range c.groups {
+		for _, q := range g.queries {
+			if q.ErrorCode != "" {
+				q.Operation = operation(q.SQL, q.CommandTag)
+				out = append(out, *q)
+			}
+		}
+	}
+	c.groups, c.open = nil, nil
+	return out
 }
 
 func hash(parts ...any) uint64 {

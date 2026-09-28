@@ -171,3 +171,24 @@ func TestConnErrors(t *testing.T) {
 		t.Fatalf("idle FATAL: %+v", r)
 	}
 }
+
+func TestCloseReportsErroredInFlightQuery(t *testing.T) {
+	c := NewClientConn()
+	c.Feed(event.DirRecv, 1, fQuery("select pg_sleep(1)"), uint32(len(fQuery("select pg_sleep(1)"))))
+	// pgbouncer gives up waiting for a server, sends an error and closes.
+	e := bError("08P01", "query_wait_timeout")
+	r := c.Feed(event.DirSend, 7, e, uint32(len(e)))
+	if len(r.Done) != 0 || len(r.ConnErrors) != 0 {
+		t.Fatalf("before close: %+v", r)
+	}
+	qs := c.Close()
+	if len(qs) != 1 || qs[0].ErrorCode != "08P01" || qs[0].End != 7 || qs[0].SQL != "select pg_sleep(1)" {
+		t.Fatalf("close: %+v", qs)
+	}
+	// A query still waiting without an error is not reported.
+	c2 := NewClientConn()
+	c2.Feed(event.DirRecv, 1, fQuery("select 1"), uint32(len(fQuery("select 1"))))
+	if qs := c2.Close(); len(qs) != 0 {
+		t.Fatalf("unanswered query reported: %+v", qs)
+	}
+}

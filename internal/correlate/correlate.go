@@ -85,13 +85,19 @@ type server struct {
 	unattributed []uint64 // server query ids started with no client match
 }
 
+type lastRead struct {
+	key event.ConnKey
+	seq uint64
+}
+
 type Correlator struct {
 	sink    func(Trace)
 	hold    uint64
 	clients map[event.ConnKey]*client
 	servers map[event.ConnKey]*server
-	waiting map[event.ConnKey]bool   // clients with a non-empty queue
-	lastRd  map[uint32]event.ConnKey // per pid: client most recently read from
+	waiting map[event.ConnKey]bool // clients with a non-empty queue
+	lastRd  map[uint32]lastRead    // per pid: client most recently read from
+	seq     map[uint32]uint64      // per pid: data events seen
 	// stats is read by other goroutines (stats log, metrics); everything else
 	// is owned by the goroutine calling the methods above.
 	stats map[string]*atomic.Uint64
@@ -106,7 +112,8 @@ func New(sink func(Trace), holdTimeout time.Duration) *Correlator {
 		clients: map[event.ConnKey]*client{},
 		servers: map[event.ConnKey]*server{},
 		waiting: map[event.ConnKey]bool{},
-		lastRd:  map[uint32]event.ConnKey{},
+		lastRd:  map[uint32]lastRead{},
+		seq:     map[uint32]uint64{},
 		stats:   newStats(),
 	}
 }
@@ -139,7 +146,7 @@ func (c *Correlator) server(k event.ConnKey) *server {
 
 // ClientRecv records that pgbouncer just read from client k.
 func (c *Correlator) ClientRecv(pid uint32, k event.ConnKey, ts uint64) {
-	c.lastRd[pid] = k
+	c.lastRd[pid] = lastRead{key: k, seq: c.seq[pid]}
 }
 
 // ClientStarted records a query read from a client.
@@ -197,8 +204,11 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 	pick, corr := cands[0], Exact
 	if len(cands) > 1 {
 		corr = Inferred
-		if last, ok := c.lastRd[pid]; ok && slices.Contains(cands, last) {
-			pick = last
+		// pgbouncer forwards a query in the same step it reads it when a
+		// server is free; otherwise the query waits and pgbouncer serves
+		// waiting clients oldest first when a server is released.
+		if last, ok := c.lastRd[pid]; ok && last.seq == c.seq[pid]-1 && slices.Contains(cands, last.key) {
+			pick = last.key
 		} else {
 			for _, ck := range cands[1:] {
 				if c.clients[ck].queue[0].ts < c.clients[pick].queue[0].ts {
@@ -321,7 +331,7 @@ func (c *Correlator) ClientClosed(k event.ConnKey) {
 	delete(c.clients, k)
 	delete(c.waiting, k)
 	for pid, last := range c.lastRd {
-		if last == k {
+		if last.key == k {
 			delete(c.lastRd, pid)
 		}
 	}
@@ -372,3 +382,9 @@ func (c *Correlator) Size() int {
 	}
 	return n
 }
+
+// Event marks one pgbouncer data event (any send/recv) of process pid. It
+// must be called before the event is processed, so ServerStarted can tell
+// whether the client read happened immediately before (an immediate forward)
+// or earlier (the client waited for a server).
+func (c *Correlator) Event(pid uint32) { c.seq[pid]++ }

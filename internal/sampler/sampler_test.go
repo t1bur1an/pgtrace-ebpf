@@ -87,3 +87,14 @@ func TestSampledParentKept(t *testing.T) {
 		t.Fatalf("error takes precedence: %q", r)
 	}
 }
+
+func TestLongIdleInTransactionKept(t *testing.T) {
+	s := New(0, 100*time.Millisecond, 1)
+	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: fast()}}
+	if keep, r := s.DecideTraceIdle(tr, false, 5*time.Second); !keep || r != ReasonSlow {
+		t.Fatalf("long idle gap: %v %q", keep, r)
+	}
+	if keep, _ := s.DecideTraceIdle(tr, false, time.Millisecond); keep {
+		t.Fatal("short idle gap must not force keeping")
+	}
+}

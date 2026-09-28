@@ -178,7 +178,7 @@ func run(c config) error {
 		if c.sqlcommenter && tr.Client != nil {
 			client = withComment(client, tr.Client.Q, met)
 		}
-		keep, reason := smp.DecideTraceParent(tr, c.parentSampling && client.UseParent && export.Sampled(client.Comment))
+		keep, reason := smp.DecideTraceIdle(tr, c.parentSampling && client.UseParent && export.Sampled(client.Comment), client.IdleInTx)
 		met.SpanDecision(reason, keep)
 		if keep {
 			exp.ExportTrace(tr, reason, client, serverAddr)

@@ -56,12 +56,21 @@ parent means the trace is always kept (`pgtrace.sample_reason=parent`). A
 traceparent inside a *reused* prepared statement is ignored, since it belongs
 to whichever request prepared it (counted as `not_per_execution`).
 
+**Contention:** deadlocks, lock and statement timeouts, serialization
+failures, pool exhaustion, pgbouncer queue timeouts, idle-in-transaction
+holders and rejected logins all show up in traces and metrics, and the
+dashboard has a *Contention* row. `scripts/contention.sh` provokes each case
+and checks the evidence; `docs/contention.md` explains what to look for and
+what can't be seen (e.g. which session held a lock).
+
 Performance: `docs/performance.md`. Metrics and cardinality: `docs/metrics.md`.
 
 ## Quick start
 
 ```bash
-make e2e      # builds, starts the stack, generates traffic, verifies traces, metrics and Grafana
+make e2e                  # builds, starts the stack, generates traffic, verifies traces, metrics and Grafana
+./scripts/contention.sh   # deadlocks, lock waits, timeouts, pool exhaustion, idle-in-transaction, rejected logins
+./scripts/soak.sh         # 90-minute soak with big JSON statements (DURATION=seconds)
 ```
 
 or manually:

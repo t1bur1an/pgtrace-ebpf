@@ -92,4 +92,5 @@ services:
       PGDATABASE: postgres
     volumes:
       - ./soak:/soak:ro
+      - ./contention:/contention:ro
     entrypoint: []
