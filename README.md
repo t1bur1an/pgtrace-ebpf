@@ -92,6 +92,12 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-metrics-addr` | `:9464` | Prometheus `/metrics` address; empty disables it |
 | `-stats-interval` | `10s` | stats log interval |
 | `-bpf-stats` | `false` | enable kernel BPF run-time accounting (~1% extra overhead) |
+| `-capture-bytes` | `4096` | payload bytes the kernel copies per send/recv (64 … 16384) |
+| `-max-message-bytes` | `65536` | most bytes of one protocol message the parser keeps; memory is allocated per message up to this |
+| `-max-query-text` | `2048` | most bytes of SQL in `db.query.text` |
+| `-metrics-labels` | *(off)* | opt-in per-client metrics: any of `database,user,client_addr` |
+| `-metrics-label-limit` | `200` | most label combinations tracked; extra ones are recorded as `other` |
+| `-metrics-label-ttl` | `30m` | idle label combinations are removed after this |
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.
@@ -111,8 +117,12 @@ host pid namespace.
 | `pgtrace_connections` | `side` | tracked sockets |
 | `pgtrace_traced_processes` | | pgbouncer processes |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | | with `-bpf-stats` |
+| `pgtrace_truncations_total` | `layer` | kernel / parser / export: which size cap fired |
+| `pgtrace_client_*` | enabled client labels | opt-in (`-metrics-labels`): queries, errors, duration, pool wait per database/user/client IP |
 
-Plus the standard Go and process collectors.
+Plus the standard Go and process collectors. Every label is bounded; the
+series ceiling is 1,897 without client labels and 8,331 with the default
+label limit. See `docs/metrics.md` for every series and how to size the limit.
 
 ## Development
 
@@ -129,8 +139,9 @@ make generate    # re-generate BPF objects after editing bpf/pgtrace.bpf.c (clan
 - Client connections opened before the agent started have no startup
   attributes (user, database, application_name).
 - No TLS on either side (payloads would be encrypted).
-- Payload capture is capped at 4 KiB per syscall; longer SQL is truncated
-  (`pgtrace.truncated=true`) but the parser stays in sync.
+- Payload capture is capped per syscall (`-capture-bytes`) and per message
+  (`-max-message-bytes`); longer SQL is truncated (`pgtrace.truncated=true`)
+  but the parser stays in sync. `pgtrace_truncations_total` shows which cap fires.
 - Prepared statements parsed before the agent started show as
   `<unknown prepared statement "name">`. They still correlate through their
   bind values.
