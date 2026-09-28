@@ -114,3 +114,34 @@ func TestStartedIDsMatchDoneAndTxStatus(t *testing.T) {
 		t.Fatalf("extended done %+v", r3.Done)
 	}
 }
+
+func TestPerExecution(t *testing.T) {
+	c := NewClientConn()
+	run := func(fe []byte) Query {
+		t.Helper()
+		c.Feed(event.DirRecv, 1, fe, uint32(len(fe)))
+		be := cat(bParseDone(), bBindDone(), bComplete("SELECT 1"), bReady())
+		r := c.Feed(event.DirSend, 2, be, uint32(len(be)))
+		if len(r.Done) != 1 {
+			t.Fatalf("done %+v", r.Done)
+		}
+		return r.Done[0]
+	}
+	sq := func(sql string) Query {
+		c.Feed(event.DirRecv, 1, fQuery(sql), uint32(len(fQuery(sql))))
+		be := cat(bComplete("SELECT 1"), bReady())
+		return c.Feed(event.DirSend, 2, be, uint32(len(be))).Done[0]
+	}
+	if !sq("select 1").PerExecution {
+		t.Error("simple query must be per-execution")
+	}
+	if !run(cat(fParse("", "select 1"), fBind("", ""), fExecute(""), fSync())).PerExecution {
+		t.Error("unnamed Parse in the same group must be per-execution")
+	}
+	if !run(cat(fParse("s1", "select 1"), fBind("", "s1"), fExecute(""), fSync())).PerExecution {
+		t.Error("named Parse in the same group must be per-execution")
+	}
+	if run(cat(fBind("", "s1"), fExecute(""), fSync())).PerExecution {
+		t.Error("reused named statement must not be per-execution")
+	}
+}

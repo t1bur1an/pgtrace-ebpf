@@ -27,6 +27,9 @@ type Query struct {
 	Sig, BindSig uint64
 	SQLKnown     bool
 	TxStatus     byte // status of the ReadyForQuery that closed its group: I, T or E
+	// PerExecution: the SQL text was sent for this execution (simple query,
+	// or Parse in the same Sync group), not reused from an earlier Parse.
+	PerExecution bool
 }
 
 // Start reports a query the moment its Query or Execute message is seen.
@@ -78,6 +81,7 @@ type Conn struct {
 	groups  []*group
 	open    *group // extended group collecting Executes until Sync
 	nextID  uint64
+	parsed  map[string]bool // statements parsed since the last Sync
 }
 
 // NewConn parses a pgbouncer→postgres connection: pgbouncer sends the
@@ -106,6 +110,7 @@ func NewConnWith(client bool, o Options) *Conn {
 		stmts:   map[string]string{},
 		stmtTr:  map[string]bool{},
 		portals: map[string]portal{},
+		parsed:  map[string]bool{},
 	}
 }
 
@@ -170,13 +175,15 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 	case 'Q':
 		sql, _ := cstring(m.body)
 		c.open = nil
-		q := &Query{Start: ts, SQL: sql, Protocol: "simple", Truncated: m.truncated, Sig: hash(sql), SQLKnown: true}
+		clear(c.parsed)
+		q := &Query{Start: ts, SQL: sql, Protocol: "simple", Truncated: m.truncated, Sig: hash(sql), SQLKnown: true, PerExecution: true}
 		c.groups = append(c.groups, &group{simple: true, queries: []*Query{q}})
 		c.start(q, r)
 	case 'P':
 		name, rest := cstring(m.body)
 		sql, _ := cstring(rest)
 		c.stmts[name], c.stmtTr[name] = sql, m.truncated
+		c.parsed[name] = true
 	case 'B':
 		name, rest := cstring(m.body)
 		stmt, rest := cstring(rest)
@@ -195,10 +202,12 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 		q := &Query{
 			Start: ts, SQL: sql, Protocol: "extended", Truncated: c.stmtTr[p.stmt],
 			Sig: hash(sql, p.bind), BindSig: hash(p.bind), SQLKnown: known,
+			PerExecution: c.parsed[p.stmt],
 		}
 		c.open.queries = append(c.open.queries, q)
 		c.start(q, r)
 	case 'S':
+		clear(c.parsed)
 		if c.open == nil {
 			c.groups = append(c.groups, &group{})
 		}

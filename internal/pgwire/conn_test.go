@@ -17,7 +17,7 @@ const (
 func core(qs []Query) []Query {
 	out := make([]Query, len(qs))
 	for i, q := range qs {
-		q.ID, q.Sig, q.BindSig, q.SQLKnown, q.TxStatus = 0, 0, 0, false, 0
+		q.ID, q.Sig, q.BindSig, q.SQLKnown, q.TxStatus, q.PerExecution = 0, 0, 0, false, 0, false
 		out[i] = q
 	}
 	return out
