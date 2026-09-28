@@ -70,3 +70,35 @@ func TestRunDropsUnsampled(t *testing.T) {
 		t.Fatalf("n=%d stats=%+v", n, a.Stats())
 	}
 }
+
+type fakeFilter struct{ ignored, cleared []event.ConnKey }
+
+func (f *fakeFilter) Ignore(k event.ConnKey) { f.ignored = append(f.ignored, k) }
+func (f *fakeFilter) Clear(k event.ConnKey)  { f.cleared = append(f.cleared, k) }
+
+func TestRunTellsKernelToIgnoreNonServerFDs(t *testing.T) {
+	server := event.ConnKey{PID: 1, FD: 10}
+	client := event.ConnKey{PID: 1, FD: 11}
+	other := event.ConnKey{PID: 1, FD: 12}
+	events := make(chan any, 8)
+	events <- event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+	events <- event.Connect{Key: other, Addr: netip.MustParseAddrPort("10.0.0.3:53")}
+	events <- data(client, event.DirRecv, 1, msg('Q', "select 1\x00")) // accepted client socket, unknown until looked up
+	events <- data(server, event.DirSend, 2, msg('Q', "select 1\x00"))
+	events <- event.Close{Key: client}
+	close(events)
+
+	f := &fakeFilter{}
+	a := New(connmap.New(t.TempDir(), 5432), sampler.New(1, time.Second, 1), func(export.Span) {})
+	a.Filter = f
+	a.Run(context.Background(), events)
+
+	wantIgnored := []event.ConnKey{other, client}
+	if len(f.ignored) != 2 || f.ignored[0] != wantIgnored[0] || f.ignored[1] != wantIgnored[1] {
+		t.Fatalf("ignored %v want %v", f.ignored, wantIgnored)
+	}
+	// Server connect clears any stale class; close clears after in-flight writes.
+	if len(f.cleared) != 2 || f.cleared[0] != server || f.cleared[1] != client {
+		t.Fatalf("cleared %v", f.cleared)
+	}
+}

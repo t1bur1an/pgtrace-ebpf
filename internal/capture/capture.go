@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,12 +19,27 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/t1bur1an/pgtrace/internal/event"
+	"golang.org/x/sys/unix"
 )
 
 type Config struct {
 	Comm        string        // process name to trace, e.g. "pgbouncer"
 	ProcRoot    string        // usually /proc (host pid namespace)
 	RescanEvery time.Duration // pid discovery interval
+	BPFStats    bool          // enable kernel run-time accounting (small per-run cost)
+}
+
+// pollInterval bounds how long events wait in the ring: the BPF side only
+// wakes the reader when a lot of data is pending.
+const pollInterval = 20 * time.Millisecond
+
+const classIgnore = uint8(2)
+
+// fdKey matches struct fd_key in bpf/pgtrace.bpf.c.
+type fdKey struct {
+	TGID uint32
+	FD   int32
 }
 
 // Capture delivers event.Data, event.Connect and event.Close values on Events.
@@ -32,6 +48,8 @@ type Capture struct {
 
 	objs   pgtraceObjects
 	links  []link.Link
+	progs  []*ebpf.Program
+	stats  io.Closer // keeps kernel BPF run-time accounting enabled
 	reader *ringbuf.Reader
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -52,26 +70,23 @@ func Start(ctx context.Context, cfg Config) (*Capture, error) {
 		}
 		return nil, fmt.Errorf("load bpf: %w", err)
 	}
-	progs := map[string]*ebpf.Program{
-		"sys_enter_sendto":   c.objs.EnterSendto,
-		"sys_exit_sendto":    c.objs.ExitSendto,
-		"sys_enter_recvfrom": c.objs.EnterRecvfrom,
-		"sys_exit_recvfrom":  c.objs.ExitRecvfrom,
-		"sys_enter_write":    c.objs.EnterWrite,
-		"sys_exit_write":     c.objs.ExitWrite,
-		"sys_enter_read":     c.objs.EnterRead,
-		"sys_exit_read":      c.objs.ExitRead,
-		"sys_enter_connect":  c.objs.EnterConnect,
-		"sys_exit_connect":   c.objs.ExitConnect,
-		"sys_enter_close":    c.objs.EnterClose,
-	}
-	for name, prog := range progs {
-		l, err := link.Tracepoint("syscalls", name, prog, nil)
+	for _, prog := range []*ebpf.Program{c.objs.ExitSendto, c.objs.ExitRecvfrom, c.objs.ExitConnect, c.objs.EnterClose} {
+		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
 		if err != nil {
 			c.Close()
-			return nil, fmt.Errorf("attach %s: %w", name, err)
+			return nil, fmt.Errorf("attach %s: %w", prog, err)
 		}
 		c.links = append(c.links, l)
+		c.progs = append(c.progs, prog)
+	}
+	// Run-time accounting costs two clock reads per program run; it is only
+	// used for the stats log, so failure to enable it is not fatal.
+	if cfg.BPFStats {
+		if st, err := ebpf.EnableStats(uint32(unix.BPF_STATS_RUN_TIME)); err != nil {
+			slog.Warn("bpf run-time stats unavailable", "err", err)
+		} else {
+			c.stats = st
+		}
 	}
 	rd, err := ringbuf.NewReader(c.objs.Events)
 	if err != nil {
@@ -102,10 +117,15 @@ func Start(ctx context.Context, cfg Config) (*Capture, error) {
 		defer c.wg.Done()
 		defer close(events)
 		var rec ringbuf.Record
+		rd.SetDeadline(time.Now().Add(pollInterval))
 		for {
 			if err := rd.ReadInto(&rec); err != nil {
 				if errors.Is(err, ringbuf.ErrClosed) {
 					return
+				}
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					rd.SetDeadline(time.Now().Add(pollInterval))
+					continue
 				}
 				slog.Warn("ringbuf read", "err", err)
 				continue
@@ -175,6 +195,16 @@ func (c *Capture) Pids() []uint32 {
 	return out
 }
 
+// Ignore stops payload capture for a socket that is not a server connection.
+func (c *Capture) Ignore(k event.ConnKey) {
+	_ = c.objs.FdClass.Put(fdKey{k.PID, k.FD}, classIgnore)
+}
+
+// Clear makes a socket unclassified again.
+func (c *Capture) Clear(k event.ConnKey) {
+	_ = c.objs.FdClass.Delete(fdKey{k.PID, k.FD})
+}
+
 // Drops returns the number of events the kernel failed to enqueue.
 func (c *Capture) Drops() uint64 {
 	var perCPU []uint64
@@ -188,7 +218,22 @@ func (c *Capture) Drops() uint64 {
 	return sum
 }
 
+// ProgStats returns total kernel time spent in, and number of runs of, all
+// attached programs. Both are zero when run-time stats are unavailable.
+func (c *Capture) ProgStats() (runtime time.Duration, runs uint64) {
+	for _, p := range c.progs {
+		if st, err := p.Stats(); err == nil {
+			runtime += st.Runtime
+			runs += st.RunCount
+		}
+	}
+	return
+}
+
 func (c *Capture) Close() error {
+	if c.stats != nil {
+		c.stats.Close()
+	}
 	if c.cancel != nil {
 		c.cancel()
 	}

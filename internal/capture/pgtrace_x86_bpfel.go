@@ -13,18 +13,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type pgtraceArgs struct {
-	_         structs.HostLayout
-	Buf       uint64
-	Fd        int32
-	Dir       uint8
-	IsConnect uint8
-	Family    uint16
-	Port      [2]uint8
-	Addr      [16]uint8
-	_         [6]byte
-}
-
 type pgtraceEvent struct {
 	_        structs.HostLayout
 	Ts       uint64
@@ -41,26 +29,25 @@ type pgtraceEvent struct {
 	Payload  [4096]uint8
 }
 
+type pgtraceFdKey struct {
+	_    structs.HostLayout
+	Tgid uint32
+	Fd   int32
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	pgtraceMapActive         = "active"
-	pgtraceMapDrops          = "drops"
-	pgtraceMapEvents         = "events"
-	pgtraceMapScratch        = "scratch"
-	pgtraceMapTargetPids     = "target_pids"
-	pgtraceProgEnterClose    = "enter_close"
-	pgtraceProgEnterConnect  = "enter_connect"
-	pgtraceProgEnterRead     = "enter_read"
-	pgtraceProgEnterRecvfrom = "enter_recvfrom"
-	pgtraceProgEnterSendto   = "enter_sendto"
-	pgtraceProgEnterWrite    = "enter_write"
-	pgtraceProgExitConnect   = "exit_connect"
-	pgtraceProgExitRead      = "exit_read"
-	pgtraceProgExitRecvfrom  = "exit_recvfrom"
-	pgtraceProgExitSendto    = "exit_sendto"
-	pgtraceProgExitWrite     = "exit_write"
+	pgtraceMapDrops         = "drops"
+	pgtraceMapEvents        = "events"
+	pgtraceMapFdClass       = "fd_class"
+	pgtraceMapScratch       = "scratch"
+	pgtraceMapTargetPids    = "target_pids"
+	pgtraceProgEnterClose   = "enter_close"
+	pgtraceProgExitConnect  = "exit_connect"
+	pgtraceProgExitRecvfrom = "exit_recvfrom"
+	pgtraceProgExitSendto   = "exit_sendto"
 )
 
 // loadPgtrace returns the embedded CollectionSpec for pgtrace.
@@ -105,26 +92,19 @@ type pgtraceSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type pgtraceProgramSpecs struct {
-	EnterClose    *ebpf.ProgramSpec `ebpf:"enter_close"`
-	EnterConnect  *ebpf.ProgramSpec `ebpf:"enter_connect"`
-	EnterRead     *ebpf.ProgramSpec `ebpf:"enter_read"`
-	EnterRecvfrom *ebpf.ProgramSpec `ebpf:"enter_recvfrom"`
-	EnterSendto   *ebpf.ProgramSpec `ebpf:"enter_sendto"`
-	EnterWrite    *ebpf.ProgramSpec `ebpf:"enter_write"`
-	ExitConnect   *ebpf.ProgramSpec `ebpf:"exit_connect"`
-	ExitRead      *ebpf.ProgramSpec `ebpf:"exit_read"`
-	ExitRecvfrom  *ebpf.ProgramSpec `ebpf:"exit_recvfrom"`
-	ExitSendto    *ebpf.ProgramSpec `ebpf:"exit_sendto"`
-	ExitWrite     *ebpf.ProgramSpec `ebpf:"exit_write"`
+	EnterClose   *ebpf.ProgramSpec `ebpf:"enter_close"`
+	ExitConnect  *ebpf.ProgramSpec `ebpf:"exit_connect"`
+	ExitRecvfrom *ebpf.ProgramSpec `ebpf:"exit_recvfrom"`
+	ExitSendto   *ebpf.ProgramSpec `ebpf:"exit_sendto"`
 }
 
 // pgtraceMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type pgtraceMapSpecs struct {
-	Active     *ebpf.MapSpec `ebpf:"active"`
 	Drops      *ebpf.MapSpec `ebpf:"drops"`
 	Events     *ebpf.MapSpec `ebpf:"events"`
+	FdClass    *ebpf.MapSpec `ebpf:"fd_class"`
 	Scratch    *ebpf.MapSpec `ebpf:"scratch"`
 	TargetPids *ebpf.MapSpec `ebpf:"target_pids"`
 }
@@ -155,18 +135,18 @@ func (o *pgtraceObjects) Close() error {
 //
 // It can be passed to loadPgtraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pgtraceMaps struct {
-	Active     *ebpf.Map `ebpf:"active"`
 	Drops      *ebpf.Map `ebpf:"drops"`
 	Events     *ebpf.Map `ebpf:"events"`
+	FdClass    *ebpf.Map `ebpf:"fd_class"`
 	Scratch    *ebpf.Map `ebpf:"scratch"`
 	TargetPids *ebpf.Map `ebpf:"target_pids"`
 }
 
 func (m *pgtraceMaps) Close() error {
 	return _PgtraceClose(
-		m.Active,
 		m.Drops,
 		m.Events,
+		m.FdClass,
 		m.Scratch,
 		m.TargetPids,
 	)
@@ -182,32 +162,18 @@ type pgtraceVariables struct {
 //
 // It can be passed to loadPgtraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pgtracePrograms struct {
-	EnterClose    *ebpf.Program `ebpf:"enter_close"`
-	EnterConnect  *ebpf.Program `ebpf:"enter_connect"`
-	EnterRead     *ebpf.Program `ebpf:"enter_read"`
-	EnterRecvfrom *ebpf.Program `ebpf:"enter_recvfrom"`
-	EnterSendto   *ebpf.Program `ebpf:"enter_sendto"`
-	EnterWrite    *ebpf.Program `ebpf:"enter_write"`
-	ExitConnect   *ebpf.Program `ebpf:"exit_connect"`
-	ExitRead      *ebpf.Program `ebpf:"exit_read"`
-	ExitRecvfrom  *ebpf.Program `ebpf:"exit_recvfrom"`
-	ExitSendto    *ebpf.Program `ebpf:"exit_sendto"`
-	ExitWrite     *ebpf.Program `ebpf:"exit_write"`
+	EnterClose   *ebpf.Program `ebpf:"enter_close"`
+	ExitConnect  *ebpf.Program `ebpf:"exit_connect"`
+	ExitRecvfrom *ebpf.Program `ebpf:"exit_recvfrom"`
+	ExitSendto   *ebpf.Program `ebpf:"exit_sendto"`
 }
 
 func (p *pgtracePrograms) Close() error {
 	return _PgtraceClose(
 		p.EnterClose,
-		p.EnterConnect,
-		p.EnterRead,
-		p.EnterRecvfrom,
-		p.EnterSendto,
-		p.EnterWrite,
 		p.ExitConnect,
-		p.ExitRead,
 		p.ExitRecvfrom,
 		p.ExitSendto,
-		p.ExitWrite,
 	)
 }
 

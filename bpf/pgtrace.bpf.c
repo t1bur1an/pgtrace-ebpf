@@ -1,31 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
-// Captures socket payloads of traced processes (pgbouncer) at syscall level.
+// Captures socket payloads of traced processes (pgbouncer) with fexit probes on
+// the kernel's sendto/recvfrom/connect implementations. fentry/fexit only cost
+// the probed functions; syscall tracepoints would push every syscall on the
+// host through the slow path.
 #include <linux/bpf.h>
 #include <linux/types.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 
 #define MAX_PAYLOAD 4096
 #define EINPROGRESS 115
 #define AF_INET 2
 #define AF_INET6 10
+// Wake the consumer only once this much data is pending; otherwise it drains
+// the ring on its own poll interval. Avoids one wakeup per event.
+#define WAKEUP_BYTES (1 << 20)
+
+#define CLASS_IGNORE 2
 
 enum kind { K_DATA = 0, K_CONNECT = 1, K_CLOSE = 2 };
 enum dir { D_SEND = 0, D_RECV = 1 };
-
-// Layout of syscalls:sys_enter_* / sys_exit_* tracepoint records.
-struct sys_enter_ctx {
-	__u64 common;
-	__s32 nr;
-	__u32 pad;
-	__u64 args[6];
-};
-
-struct sys_exit_ctx {
-	__u64 common;
-	__s32 nr;
-	__u32 pad;
-	__s64 ret;
-};
 
 // Must match internal/capture/decode.go.
 struct event {
@@ -43,16 +37,6 @@ struct event {
 	__u8 payload[MAX_PAYLOAD];
 };
 
-struct args {
-	__u64 buf;
-	__s32 fd;
-	__u8 dir;
-	__u8 is_connect;
-	__u16 family;
-	__u8 port[2];
-	__u8 addr[16];
-};
-
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 1024);
@@ -60,12 +44,19 @@ struct {
 	__type(value, __u8);
 } target_pids SEC(".maps");
 
+struct fd_key {
+	__u32 tgid;
+	__s32 fd;
+};
+
+// fds that userspace has classified; CLASS_IGNORE means not a postgres
+// server connection, so its payload is not captured. Cleared on close.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
-	__type(key, __u64);
-	__type(value, struct args);
-} active SEC(".maps");
+	__uint(max_entries, 65536);
+	__type(key, struct fd_key);
+	__type(value, __u8);
+} fd_class SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -100,6 +91,18 @@ static __always_inline void count_drop(void)
 		__sync_fetch_and_add(d, 1);
 }
 
+static __always_inline __u64 rb_flags(void)
+{
+	return bpf_ringbuf_query(&events, BPF_RB_AVAIL_DATA) >= WAKEUP_BYTES ? BPF_RB_FORCE_WAKEUP : BPF_RB_NO_WAKEUP;
+}
+
+static __always_inline int ignored(__u64 pid_tgid, __s32 fd)
+{
+	struct fd_key k = { .tgid = pid_tgid >> 32, .fd = fd };
+	__u8 *c = bpf_map_lookup_elem(&fd_class, &k);
+	return c && *c == CLASS_IGNORE;
+}
+
 static __always_inline struct event *new_event(__u64 pid_tgid, __s32 fd, __u8 kind)
 {
 	__u32 zero = 0;
@@ -117,116 +120,85 @@ static __always_inline struct event *new_event(__u64 pid_tgid, __s32 fd, __u8 ki
 	return e;
 }
 
-static __always_inline int enter_io(struct sys_enter_ctx *ctx, __u8 dir)
+static __always_inline void emit_data(__s32 fd, void *buf, int ret, __u8 dir)
+{
+	if (ret <= 0)
+		return;
+	__u64 id = bpf_get_current_pid_tgid();
+	if (!traced(id) || ignored(id, fd))
+		return;
+	struct event *e = new_event(id, fd, K_DATA);
+	if (!e)
+		return;
+	__u32 n = ret > MAX_PAYLOAD ? MAX_PAYLOAD : (__u32)ret;
+	e->dir = dir;
+	e->total_len = ret;
+	if (bpf_probe_read_user(e->payload, n, buf) != 0)
+		n = 0;
+	e->cap_len = n;
+	__u64 size = offsetof(struct event, payload) + n;
+	if (size > sizeof(*e))
+		size = sizeof(*e);
+	if (bpf_ringbuf_output(&events, e, size, rb_flags()) != 0)
+		count_drop();
+}
+
+SEC("fexit/__sys_sendto")
+int BPF_PROG(exit_sendto, int fd, void *buff, __u64 len, unsigned int flags, void *addr, int addr_len, int ret)
+{
+	emit_data(fd, buff, ret, D_SEND);
+	return 0;
+}
+
+SEC("fexit/__sys_recvfrom")
+int BPF_PROG(exit_recvfrom, int fd, void *ubuf, __u64 size, unsigned int flags, void *addr, int *addr_len, int ret)
+{
+	emit_data(fd, ubuf, ret, D_RECV);
+	return 0;
+}
+
+SEC("fexit/__sys_connect")
+int BPF_PROG(exit_connect, int fd, void *uservaddr, int addrlen, int ret)
+{
+	if (ret != 0 && ret != -EINPROGRESS)
+		return 0;
+	__u64 id = bpf_get_current_pid_tgid();
+	if (!traced(id))
+		return 0;
+	__u16 family = 0;
+	bpf_probe_read_user(&family, sizeof(family), uservaddr);
+	if (family != AF_INET && family != AF_INET6)
+		return 0;
+	struct event *e = new_event(id, fd, K_CONNECT);
+	if (!e)
+		return 0;
+	e->family = family;
+	bpf_probe_read_user(e->port, 2, uservaddr + 2);
+	__builtin_memset(e->addr, 0, sizeof(e->addr));
+	if (family == AF_INET)
+		bpf_probe_read_user(e->addr, 4, uservaddr + 4);
+	else
+		bpf_probe_read_user(e->addr, 16, uservaddr + 8);
+	if (bpf_ringbuf_output(&events, e, offsetof(struct event, payload), rb_flags()) != 0)
+		count_drop();
+	return 0;
+}
+
+// Offset of di (first syscall argument) in x86-64 struct pt_regs.
+#define PT_REGS_DI_OFFSET 112
+
+SEC("fentry/__x64_sys_close")
+int BPF_PROG(enter_close, void *regs)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	if (!traced(id))
 		return 0;
-	struct args a = {};
-	a.fd = (__s32)ctx->args[0];
-	a.buf = ctx->args[1];
-	a.dir = dir;
-	bpf_map_update_elem(&active, &id, &a, BPF_ANY);
-	return 0;
-}
-
-static __always_inline int exit_io(struct sys_exit_ctx *ctx)
-{
-	__u64 id = bpf_get_current_pid_tgid();
-	struct args *a = bpf_map_lookup_elem(&active, &id);
-	if (!a)
-		return 0;
-	__s64 ret = ctx->ret;
-	if (ret > 0) {
-		struct event *e = new_event(id, a->fd, K_DATA);
-		if (e) {
-			__u32 n = ret > MAX_PAYLOAD ? MAX_PAYLOAD : (__u32)ret;
-			e->dir = a->dir;
-			e->total_len = ret > 0xffffffff ? 0xffffffff : (__u32)ret;
-			if (bpf_probe_read_user(e->payload, n, (void *)a->buf) != 0)
-				n = 0;
-			e->cap_len = n;
-			__u64 size = offsetof(struct event, payload) + n;
-			if (size > sizeof(*e))
-				size = sizeof(*e);
-			if (bpf_ringbuf_output(&events, e, size, 0) != 0)
-				count_drop();
-		}
-	}
-	bpf_map_delete_elem(&active, &id);
-	return 0;
-}
-
-SEC("tracepoint/syscalls/sys_enter_sendto")
-int enter_sendto(struct sys_enter_ctx *ctx) { return enter_io(ctx, D_SEND); }
-SEC("tracepoint/syscalls/sys_exit_sendto")
-int exit_sendto(struct sys_exit_ctx *ctx) { return exit_io(ctx); }
-SEC("tracepoint/syscalls/sys_enter_recvfrom")
-int enter_recvfrom(struct sys_enter_ctx *ctx) { return enter_io(ctx, D_RECV); }
-SEC("tracepoint/syscalls/sys_exit_recvfrom")
-int exit_recvfrom(struct sys_exit_ctx *ctx) { return exit_io(ctx); }
-SEC("tracepoint/syscalls/sys_enter_write")
-int enter_write(struct sys_enter_ctx *ctx) { return enter_io(ctx, D_SEND); }
-SEC("tracepoint/syscalls/sys_exit_write")
-int exit_write(struct sys_exit_ctx *ctx) { return exit_io(ctx); }
-SEC("tracepoint/syscalls/sys_enter_read")
-int enter_read(struct sys_enter_ctx *ctx) { return enter_io(ctx, D_RECV); }
-SEC("tracepoint/syscalls/sys_exit_read")
-int exit_read(struct sys_exit_ctx *ctx) { return exit_io(ctx); }
-
-SEC("tracepoint/syscalls/sys_enter_connect")
-int enter_connect(struct sys_enter_ctx *ctx)
-{
-	__u64 id = bpf_get_current_pid_tgid();
-	if (!traced(id))
-		return 0;
-	struct args a = {};
-	a.fd = (__s32)ctx->args[0];
-	a.is_connect = 1;
-	void *sa = (void *)ctx->args[1];
-	bpf_probe_read_user(&a.family, sizeof(a.family), sa);
-	if (a.family == AF_INET) {
-		bpf_probe_read_user(a.port, 2, sa + 2);
-		bpf_probe_read_user(a.addr, 4, sa + 4);
-	} else if (a.family == AF_INET6) {
-		bpf_probe_read_user(a.port, 2, sa + 2);
-		bpf_probe_read_user(a.addr, 16, sa + 8);
-	} else {
-		return 0;
-	}
-	bpf_map_update_elem(&active, &id, &a, BPF_ANY);
-	return 0;
-}
-
-SEC("tracepoint/syscalls/sys_exit_connect")
-int exit_connect(struct sys_exit_ctx *ctx)
-{
-	__u64 id = bpf_get_current_pid_tgid();
-	struct args *a = bpf_map_lookup_elem(&active, &id);
-	if (!a)
-		return 0;
-	if (a->is_connect && (ctx->ret == 0 || ctx->ret == -EINPROGRESS)) {
-		struct event *e = new_event(id, a->fd, K_CONNECT);
-		if (e) {
-			e->family = a->family;
-			__builtin_memcpy(e->port, a->port, 2);
-			__builtin_memcpy(e->addr, a->addr, 16);
-			if (bpf_ringbuf_output(&events, e, offsetof(struct event, payload), 0) != 0)
-				count_drop();
-		}
-	}
-	bpf_map_delete_elem(&active, &id);
-	return 0;
-}
-
-SEC("tracepoint/syscalls/sys_enter_close")
-int enter_close(struct sys_enter_ctx *ctx)
-{
-	__u64 id = bpf_get_current_pid_tgid();
-	if (!traced(id))
-		return 0;
-	struct event *e = new_event(id, (__s32)ctx->args[0], K_CLOSE);
-	if (e && bpf_ringbuf_output(&events, e, offsetof(struct event, payload), 0) != 0)
+	__u64 di = 0;
+	bpf_probe_read_kernel(&di, sizeof(di), regs + PT_REGS_DI_OFFSET);
+	struct fd_key k = { .tgid = id >> 32, .fd = (__s32)di };
+	bpf_map_delete_elem(&fd_class, &k);
+	struct event *e = new_event(id, k.fd, K_CLOSE);
+	if (e && bpf_ringbuf_output(&events, e, offsetof(struct event, payload), rb_flags()) != 0)
 		count_drop();
 	return 0;
 }

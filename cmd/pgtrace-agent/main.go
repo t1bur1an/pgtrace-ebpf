@@ -30,11 +30,12 @@ func main() {
 		endpoint   = flag.String("otlp-endpoint", "http://victoriatraces:10428/insert/opentelemetry/v1/traces", "OTLP/HTTP traces URL")
 		service    = flag.String("service-name", "pgbouncer", "service.name resource attribute")
 		statsEvery = flag.Duration("stats-interval", 10*time.Second, "stats log interval")
+		bpfStats   = flag.Bool("bpf-stats", false, "enable kernel BPF run-time accounting and log it")
 	)
 	flag.Parse()
 	applyEnv()
 
-	if err := run(*comm, *procRoot, uint16(*pgPort), *ratio, time.Duration(*slowMS)*time.Millisecond, *endpoint, *service, *statsEvery); err != nil {
+	if err := run(*comm, *procRoot, uint16(*pgPort), *ratio, time.Duration(*slowMS)*time.Millisecond, *endpoint, *service, *statsEvery, *bpfStats); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -56,7 +57,7 @@ func applyEnv() {
 	})
 }
 
-func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration, endpoint, service string, statsEvery time.Duration) error {
+func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration, endpoint, service string, statsEvery time.Duration, bpfStats bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -72,7 +73,7 @@ func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration
 		}
 	}()
 
-	capt, err := capture.Start(ctx, capture.Config{Comm: comm, ProcRoot: procRoot, RescanEvery: 5 * time.Second})
+	capt, err := capture.Start(ctx, capture.Config{Comm: comm, ProcRoot: procRoot, RescanEvery: 5 * time.Second, BPFStats: bpfStats})
 	if err != nil {
 		return fmt.Errorf("start capture (needs CAP_BPF/CAP_PERFMON or privileged): %w", err)
 	}
@@ -80,6 +81,7 @@ func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration
 
 	smp := sampler.New(ratio, slow, uint64(time.Now().UnixNano()))
 	ag := agent.New(connmap.New(procRoot, pgPort), smp, exp.Export)
+	ag.Filter = capt
 	slog.Info("attached", "comm", comm, "pids", capt.Pids(), "sample_ratio", ratio, "slow", slow, "endpoint", endpoint)
 
 	go func() {
@@ -91,9 +93,10 @@ func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration
 				return
 			case <-t.C:
 				st, ss := ag.Stats(), smp.Stats()
+				bpfTime, bpfRuns := capt.ProgStats()
 				slog.Info("stats", "events", st.Events, "queries", st.Queries, "server_conns", st.Conns,
 					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_ratio", ss["kept_ratio"],
-					"kernel_drops", capt.Drops())
+					"kernel_drops", capt.Drops(), "bpf_runs", bpfRuns, "bpf_ns", bpfTime.Nanoseconds())
 			}
 		}
 	}()

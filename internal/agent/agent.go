@@ -18,7 +18,15 @@ type Stats struct {
 	Conns   uint64 // server connections currently tracked
 }
 
+// Filter lets the agent tell the kernel which fds need no payload capture.
+type Filter interface {
+	Ignore(event.ConnKey) // not a server connection: stop capturing
+	Clear(event.ConnKey)  // unknown again (connect/close)
+}
+
 type Agent struct {
+	Filter Filter // optional
+
 	cm    *connmap.Map
 	smp   *sampler.Sampler
 	sink  func(export.Span)
@@ -53,12 +61,21 @@ func (a *Agent) handle(ev any) {
 	case event.Connect:
 		a.cm.OnConnect(ev.Key, ev.Addr)
 		delete(a.conns, ev.Key)
+		if a.cm.Lookup(ev.Key).Server {
+			a.clear(ev.Key)
+		} else {
+			a.ignore(ev.Key)
+		}
 	case event.Close:
 		a.cm.OnClose(ev.Key)
 		delete(a.conns, ev.Key)
+		// Also undoes an Ignore issued for this fd number by data events that
+		// were still queued when the kernel saw the close.
+		a.clear(ev.Key)
 	case event.Data:
 		info := a.cm.Lookup(ev.Key)
 		if !info.Server {
+			a.ignore(ev.Key)
 			return
 		}
 		c := a.conns[ev.Key]
@@ -74,6 +91,18 @@ func (a *Agent) handle(ev any) {
 		}
 	}
 	a.nconns.Store(uint64(len(a.conns)))
+}
+
+func (a *Agent) ignore(k event.ConnKey) {
+	if a.Filter != nil {
+		a.Filter.Ignore(k)
+	}
+}
+
+func (a *Agent) clear(k event.ConnKey) {
+	if a.Filter != nil {
+		a.Filter.Clear(k)
+	}
 }
 
 func (a *Agent) Stats() Stats {

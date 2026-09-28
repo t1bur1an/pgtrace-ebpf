@@ -41,6 +41,8 @@ services:
       PGTRACE_SLOW_MS: "${PGTRACE_SLOW_MS:-100}"
       PGTRACE_OTLP_ENDPOINT: http://victoriatraces:10428/insert/opentelemetry/v1/traces
       PGTRACE_STATS_INTERVAL: "${PGTRACE_STATS_INTERVAL:-10s}"
+      PGTRACE_COMM: "${PGTRACE_COMM:-pgbouncer}"
+      PGTRACE_BPF_STATS: "${PGTRACE_BPF_STATS:-false}"
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing
       - /sys/kernel/debug:/sys/kernel/debug
