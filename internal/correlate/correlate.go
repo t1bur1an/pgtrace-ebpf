@@ -108,9 +108,13 @@ type Correlator struct {
 	hold    uint64
 	clients map[event.ConnKey]*client
 	servers map[event.ConnKey]*server
-	waiting map[event.ConnKey]bool // clients with a non-empty queue
-	lastRd  map[uint32]lastRead    // per pid: client most recently read from
-	seq     map[uint32]uint64      // per pid: data events seen
+	// Clients with a non-empty queue, indexed by the signature (and bind
+	// signature) of their oldest unforwarded query, so a server query finds
+	// its candidates without scanning every waiting client.
+	bySig  map[uint64]map[event.ConnKey]struct{}
+	byBind map[uint64]map[event.ConnKey]struct{}
+	lastRd map[uint32]lastRead // per pid: client most recently read from
+	seq    map[uint32]uint64   // per pid: data events seen
 	// stats is read by other goroutines (stats log, metrics); everything else
 	// is owned by the goroutine calling the methods above.
 	stats map[string]*atomic.Uint64
@@ -125,7 +129,8 @@ func New(sink func(Trace), holdTimeout time.Duration) *Correlator {
 		hold:            uint64(holdTimeout),
 		clients:         map[event.ConnKey]*client{},
 		servers:         map[event.ConnKey]*server{},
-		waiting:         map[event.ConnKey]bool{},
+		bySig:           map[uint64]map[event.ConnKey]struct{}{},
+		byBind:          map[uint64]map[event.ConnKey]struct{}{},
 		lastRd:          map[uint32]lastRead{},
 		seq:             map[uint32]uint64{},
 		stats:           newStats(),
@@ -167,15 +172,60 @@ func (c *Correlator) ClientRecv(pid uint32, k event.ConnKey, ts uint64) {
 func (c *Correlator) ClientStarted(pid uint32, k event.ConnKey, st pgwire.Start) {
 	cl := c.client(k)
 	cl.queue = append(cl.queue, pending{id: st.ID, sig: st.Sig, bindSig: st.BindSig, known: st.SQLKnown, ts: st.TS})
-	c.waiting[k] = true
+	if len(cl.queue) == 1 {
+		c.index(k, cl)
+	}
+}
+
+func addKey(m map[uint64]map[event.ConnKey]struct{}, sig uint64, k event.ConnKey) {
+	set := m[sig]
+	if set == nil {
+		set = map[event.ConnKey]struct{}{}
+		m[sig] = set
+	}
+	set[k] = struct{}{}
+}
+
+func delKey(m map[uint64]map[event.ConnKey]struct{}, sig uint64, k event.ConnKey) {
+	if set := m[sig]; set != nil {
+		delete(set, k)
+		if len(set) == 0 {
+			delete(m, sig)
+		}
+	}
+}
+
+// index / unindex (re)register a client under its queue head. Call unindex
+// before changing the head and index after.
+func (c *Correlator) index(k event.ConnKey, cl *client) {
+	if len(cl.queue) == 0 {
+		return
+	}
+	h := cl.queue[0]
+	addKey(c.bySig, h.sig, k)
+	if h.bindSig != 0 {
+		addKey(c.byBind, h.bindSig, k)
+	}
+}
+
+func (c *Correlator) unindex(k event.ConnKey, cl *client) {
+	if len(cl.queue) == 0 {
+		return
+	}
+	h := cl.queue[0]
+	delKey(c.bySig, h.sig, k)
+	if h.bindSig != 0 {
+		delKey(c.byBind, h.bindSig, k)
+	}
 }
 
 func (c *Correlator) pop(k event.ConnKey, cl *client, n int) {
+	c.unindex(k, cl)
 	cl.queue = cl.queue[n:]
 	if len(cl.queue) == 0 {
 		cl.queue = nil
-		delete(c.waiting, k)
 	}
+	c.index(k, cl)
 }
 
 // ServerStarted attributes a query pgbouncer sent on server connection k.
@@ -229,10 +279,16 @@ func (c *Correlator) attribute(pid uint32, k event.ConnKey, s *server, st pgwire
 	}
 
 	var cands []event.ConnKey
-	for ck := range c.waiting {
-		if ck.PID == pid && c.clients[ck].queue[0].matches(st) {
-			cands = append(cands, ck)
+	consider := func(set map[event.ConnKey]struct{}) {
+		for ck := range set {
+			if ck.PID == pid && c.clients[ck].queue[0].matches(st) && !slices.Contains(cands, ck) {
+				cands = append(cands, ck)
+			}
 		}
+	}
+	consider(c.bySig[st.Sig])
+	if st.BindSig != 0 {
+		consider(c.byBind[st.BindSig])
 	}
 	if len(cands) == 0 {
 		if s.linked {
@@ -354,11 +410,12 @@ func (c *Correlator) ClientDone(k event.ConnKey, q pgwire.Query) {
 	// A query pgbouncer answered itself was never forwarded; don't let it
 	// block the queue. Client queries complete in order, so older entries
 	// still queued or held belong to queries whose completion was lost.
+	c.unindex(k, cl)
 	cl.queue = slices.DeleteFunc(cl.queue, func(p pending) bool { return p.id <= q.ID })
 	if len(cl.queue) == 0 {
 		cl.queue = nil
-		delete(c.waiting, k)
 	}
+	c.index(k, cl)
 	for id, h := range cl.held {
 		if id < q.ID {
 			c.orphan(h.children)
@@ -387,8 +444,8 @@ func (c *Correlator) ClientClosed(k event.ConnKey) {
 			s.linked = false
 		}
 	}
+	c.unindex(k, cl)
 	delete(c.clients, k)
-	delete(c.waiting, k)
 	for pid, last := range c.lastRd {
 		if last.key == k {
 			delete(c.lastRd, pid)
