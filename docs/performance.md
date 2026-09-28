@@ -15,7 +15,7 @@ describe that mode.
 
 | question | answer |
 |---|---|
-| Throughput cost, CPU-bound, trivially cheap queries (worst case), **client + server tracing** | **−17 % TPS** at 8–64 clients (≈ 88 k client queries/s); −3 % at 1 client |
+| Throughput cost, CPU-bound, trivially cheap queries (worst case), **client + server tracing** | **−17 % TPS** at 8–64 clients (≈ 88 k client queries/s); **−18 % at 1,000 clients** (≈ 66 k client queries/s, 0 drops); −3 % at 1 client |
 | Same, **server-only** tracing | **−10 % … −13 % TPS** at 8–64 clients (≈ 90 k queries/s); −1 % … −3.5 % at 1 client |
 | Latency added per query (same workload) | **+10 µs** at 8 clients (75 → 85 µs), +2 µs at 1 client |
 | Where it goes | −3.7 %: fexit trampolines on every `sendto`/`recvfrom` on the host (paid even by pgbench and postgres); −7.7 %: capturing pgbouncer's server traffic + agent; −1 %: optional BPF run-time stats |
@@ -80,6 +80,89 @@ runtime and GC.
 **Cost model with client tracing:** about 1.2 µs of kernel CPU (≈ 10 runs ×
 120 ns) and 8 µs of agent CPU per client query. For example, 10 k client
 queries/s costs about 0.012 core in the kernel and 0.08 core in the agent.
+
+## 1,000 clients
+
+`scripts/perf_1k.sh`: 1,000 pgbench clients through one pgbouncer
+(`default_pool_size=20`, so about 980 clients are waiting for a server at any
+moment). Select-only, simple protocol, 30 s per run, 3 repetitions,
+configurations alternated. Sample ratio 0.1, `-bpf-stats` off. Raw data:
+`perf-results/1k/`.
+
+### Before the fix: the correlator didn't scale with waiting clients
+
+The first 1,000-client run (8 s smoke run) with client tracing on showed
+**600–700 k kernel ringbuf drops per run**. The agent saw only ~27 k of ~60 k
+client queries/s. For each server query, the correlator scanned every waiting
+client to find the one it belonged to:
+
+| waiting clients | before | after (index by queue-head signature) |
+|---:|---:|---:|
+| 10 | 0.60 µs | 0.46 µs |
+| 100 | 2.44 µs | 0.46 µs |
+| 1,000 | **27.6 µs** | **0.49 µs** |
+
+(`BenchmarkServerStartWithWaiting`, one attribution plus completion per op.)
+At 60 k queries/s, 27.6 µs is ~1.7 cores of work for the agent's single event
+loop, so the ringbuf overflowed. Waiting clients are now indexed by the
+signature of their oldest unforwarded query. A randomized test checks the
+index against the queues after every one of 20,000 random steps.
+
+### After the fix
+
+**One application, 1,000 clients** (`results.csv`, workload `single`):
+
+| config | TPS (mean ± sd) | Δ | avg latency | pgbouncer CPU | agent CPU | agent RSS | kernel drops |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| agent off | 80 693 ± 5 210 | — | 12.45 ms | 65 % | — | — | — |
+| server-only | 72 422 ± 436 | −10.2 % | 13.81 ms | 68 % | 32 % | 64 MiB | 0 |
+| client + server | 65 940 ± 2 143 | −18.3 % | 15.18 ms | 68 % | 73 % | 76 MiB | 0 |
+| client + server + labels (database, user, client_addr) | 66 756 ± 1 163 | −17.3 % | 14.99 ms | 68 % | 73 % | 78 MiB | 0 |
+
+- The agent saw **every** client query: client queries/s matched pgbench TPS
+  in every run, with 0 drops.
+- Correlation over the three client + server runs: 5.8 M exact, 5.6 k
+  inferred (two waiting clients drew the same random `aid`, so their queries
+  were byte-identical), 0 orphans.
+- The per-client labels cost nothing measurable, well within run-to-run
+  noise.
+- The first "off" repetition was low (73 k against 84 k for the other two), so
+  the baseline's spread is large; the percentages are against the mean.
+- The overhead matches the 8–64-client measurements
+  ([Client tracing](#client-tracing-and-correlation)): server-only ≈ −10–13 %,
+  client + server ≈ −17–18 %. It doesn't grow with the number of clients.
+  pgbouncer stayed below saturation (~68 % of a core), so the drop comes from
+  added per-query latency in this closed-loop benchmark and from the agent
+  sharing the CPUs.
+
+### Parameter-sync attach
+
+**10 applications × 100 clients**: each pgbench process has its own
+`application_name`, so pgbouncer must `SET application_name` whenever a
+server switches applications. Each process also has its own random seed;
+pgbench seeds from the clock, and processes started together otherwise send
+identical queries (`apps-distinct-seeds/results.csv`).
+
+| config | TPS (mean ± sd) | Δ vs off | agent CPU | agent RSS | traces/s | parameter-sync SETs per run |
+|---|---:|---:|---:|---:|---:|---|
+| agent off | 72 434 ± 1 298 | — | — | — | — | — |
+| client + server, **attach on** | 57 165 ± 1 803 | −21.1 % | 70.2 % | 78 MiB | 56 714 | 596 697 attached as internal children, 0 unlinked |
+| client + server, **attach off** | 57 089 ± 337 | −21.2 % | 70.4 % | 74 MiB | 76 820 | 0 attached, 605 595 exported as standalone unlinked traces |
+
+- **Attaching costs nothing measurable:** TPS, agent CPU and memory are equal
+  within noise. Holding each `SET` until the next query starts is a slice
+  append and a map lookup.
+- **It removes ~20 k standalone traces/s** (−26 % traces) in this workload.
+  The `SET`s become children of the query they were sent for, so an
+  application switch shows up inside the trace that paid for it.
+- pgbouncer sent a parameter-sync `SET` before ~35 % of all queries here.
+  Those round trips are pgbouncer's own cost. The agent-off baseline of this
+  workload (72.4 k) is ~10 % below the single-application baseline (80.7 k,
+  noisy), which suggests that cost, but the single-application baseline's
+  spread is too large to put a firm number on it.
+- The 10-application workload costs ~3 points more than the single one
+  (−21 % vs −18 %) because every forwarded query is also preceded by a traced
+  `SET` round trip.
 
 ## Setup
 

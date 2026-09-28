@@ -1,0 +1,10 @@
+rep,workload,config,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_rss_mb,client_q_per_s,traces_per_s,corr_exact,corr_inferred,corr_internal,corr_none,corr_orphan,kernel_drops
+1,apps,off,70772,14.13,67.0,,,,,,,,,,
+1,apps,attach-param-sync,54967,18.19,70.5,70.1,80,54537,54537,1634582,1516,694952,0,3,0
+1,apps,no-attach,56632,17.66,70.2,70.3,75,56182,77472,1683850,1597,0,638715,3,0
+2,apps,off,72588,13.78,67.4,,,,,,,,,,
+2,apps,attach-param-sync,57145,17.50,70.0,69.3,76,56697,56697,1699283,1619,597131,0,2,0
+2,apps,no-attach,57199,17.48,70.2,70.4,73,56745,76628,1700732,1620,0,596495,1,0
+3,apps,off,73941,13.52,67.4,,,,,,,,,,
+3,apps,attach-param-sync,59384,16.84,70.0,71.3,79,58909,58909,1765543,1732,498008,0,1,0
+3,apps,no-attach,57435,17.41,70.2,70.4,73,56973,76359,1707548,1632,0,581575,2,0

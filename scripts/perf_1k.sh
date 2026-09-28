@@ -12,7 +12,7 @@ OUT=${OUT:-$root/docs/perf-results/1k}
 export BUILDX_BUILDER=${BUILDX_BUILDER:-default} PGTRACE_STATS_INTERVAL=5s PGTRACE_SAMPLE_RATIO=0.1
 mkdir -p "$OUT"
 csv="$OUT/results.csv"
-echo "rep,workload,config,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_rss_mb,client_q_per_s,traces_per_s,corr_exact,corr_inferred,corr_internal,corr_none,corr_orphan,kernel_drops" > "$csv"
+[ -s "$csv" ] && [ "${APPEND:-0}" = 1 ] || echo "rep,workload,config,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_rss_mb,client_q_per_s,traces_per_s,corr_exact,corr_inferred,corr_internal,corr_none,corr_orphan,kernel_drops" > "$csv"
 
 cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 cpu_usec() { awk '/^usage_usec/ {print $2}' "$(cg "$1")/cpu.stat" 2>/dev/null || echo 0; }
@@ -44,7 +44,7 @@ workload() { # single | apps
 		docker compose run --rm -T loadgen pgbench -S -M simple -c 1000 -j 16 -T "$DURATION" -n 2>&1
 	else
 		docker compose run --rm -T loadgen sh -c "for i in 0 1 2 3 4 5 6 7 8 9; do
-			PGAPPNAME=app\$i pgbench -S -M simple -c 100 -j 2 -T $DURATION -n > /tmp/o\$i 2>&1 &
+			PGAPPNAME=app\$i pgbench -S -M simple -c 100 -j 2 -T $DURATION -n --random-seed=\$(( (\$i + 1) * 7919 + \$\$ )) > /tmp/o\$i 2>&1 &
 		done; wait; cat /tmp/o*"
 	fi
 }
@@ -73,11 +73,17 @@ run() { # run <rep> <workload> <config-name> <agent args...>
 	rm -rf "$tmp"
 }
 
+# pgbench seeds its random generator from the clock, so processes started
+# together would send identical queries; each process in "apps" gets its own seed.
+WORKLOADS=${WORKLOADS:-single apps}
 for rep in $(seq 1 "$REPEATS"); do
+	if [[ " $WORKLOADS " == *" single "* ]]; then
 	run "$rep" single off off
 	run "$rep" single server-only false "" true
 	run "$rep" single client+server true "" true
 	run "$rep" single client+server+labels true database,user,client_addr true
+	fi
+	[[ " $WORKLOADS " == *" apps "* ]] || continue
 	run "$rep" apps off off
 	run "$rep" apps attach-param-sync true "" true
 	run "$rep" apps no-attach true "" false
