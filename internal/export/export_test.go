@@ -61,14 +61,14 @@ func TestExportSpan(t *testing.T) {
 	}
 	a := attrs(s.Attributes)
 	checks := map[string]string{
-		"db.system":           "postgresql",
-		"db.system.name":      "postgresql",
-		"db.query.text":       "select * from t",
-		"db.operation.name":   "SELECT",
-		"server.address":      "10.0.0.2",
-		"pgtrace.protocol":    "extended",
+		"db.system":             "postgresql",
+		"db.system.name":        "postgresql",
+		"db.query.text":         "select * from t",
+		"db.operation.name":     "SELECT",
+		"server.address":        "10.0.0.2",
+		"pgtrace.protocol":      "extended",
 		"pgtrace.sample_reason": "ratio",
-		"pgtrace.command_tag": "SELECT 3",
+		"pgtrace.command_tag":   "SELECT 3",
 	}
 	for k, v := range checks {
 		if a[k].AsString() != v {
