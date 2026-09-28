@@ -12,7 +12,7 @@ func BenchmarkConnSimpleQuery(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
 		c.Feed(S, uint64(i), fe, uint32(len(fe)))
-		if len(c.Feed(R, uint64(i), be, uint32(len(be)))) != 1 {
+		if len(c.Feed(R, uint64(i), be, uint32(len(be))).Done) != 1 {
 			b.Fatal("no query")
 		}
 	}
@@ -28,7 +28,7 @@ func BenchmarkConnExtendedQuery(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
 		c.Feed(S, uint64(i), fe, uint32(len(fe)))
-		if len(c.Feed(R, uint64(i), be, uint32(len(be)))) != 1 {
+		if len(c.Feed(R, uint64(i), be, uint32(len(be))).Done) != 1 {
 			b.Fatal("no query")
 		}
 	}

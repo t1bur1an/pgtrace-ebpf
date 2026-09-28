@@ -83,7 +83,7 @@ func (a *Agent) handle(ev any) {
 			c = pgwire.NewConn()
 			a.conns[ev.Key] = c
 		}
-		for _, q := range c.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen) {
+		for _, q := range c.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen).Done {
 			a.queries.Add(1)
 			if keep, reason := a.smp.Decide(q); keep {
 				a.sink(export.Span{Q: q, PID: ev.Key.PID, FD: ev.Key.FD, Remote: info.Remote, Reason: reason})

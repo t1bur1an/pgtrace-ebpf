@@ -23,7 +23,7 @@ var (
 	// Messages whose body the parser reads; all others are skipped by length
 	// without buffering (DataRow, CopyData, RowDescription, ...).
 	frontendBody = typeSet("QPBEC")
-	backendBody  = typeSet("CE")
+	backendBody  = typeSet("CEZ")
 )
 
 func typeSet(s string) (t [256]bool) {
@@ -145,7 +145,7 @@ func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
 			if len(s.buf) < l {
 				break
 			}
-			msgs = append(msgs, msg{startupCode: code})
+			msgs = append(msgs, msg{startupCode: code, body: clone(s.buf[8:l])})
 			s.buf = s.buf[l:]
 			continue
 		}

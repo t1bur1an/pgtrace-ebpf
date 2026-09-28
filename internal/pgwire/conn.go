@@ -1,18 +1,20 @@
-// Package pgwire turns the captured bytes of one postgres server connection
-// into completed queries.
+// Package pgwire turns the captured bytes of one postgres connection, as seen
+// from pgbouncer, into queries.
 package pgwire
 
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 
 	"github.com/t1bur1an/pgtrace/internal/event"
 )
 
-// Query is one completed statement execution observed on a server connection.
+// Query is one completed statement execution.
 type Query struct {
+	ID           uint64 // per-Conn, equals the Start.ID reported when it began
 	Start, End   uint64 // CLOCK_MONOTONIC ns
 	SQL          string
 	Operation    string
@@ -22,6 +24,25 @@ type Query struct {
 	ErrorMessage string
 	Protocol     string // "simple" | "extended"
 	Truncated    bool
+	Sig, BindSig uint64
+	SQLKnown     bool
+	TxStatus     byte // status of the ReadyForQuery that closed its group: I, T or E
+}
+
+// Start reports a query the moment its Query or Execute message is seen.
+type Start struct {
+	ID       uint64
+	Sig      uint64 // hash of the SQL (and bind values for extended queries)
+	BindSig  uint64 // extended only: hash of the bind values alone
+	SQLKnown bool
+	TS       uint64
+	SQL      string
+}
+
+// Result is what one Feed call produced.
+type Result struct {
+	Started []Start
+	Done    []Query
 }
 
 // group is the work between two ReadyForQuery messages: one simple Query, or
@@ -33,46 +54,68 @@ type group struct {
 	failed  bool // extended: an error aborted the rest of the pipeline
 }
 
-// Conn tracks one server connection. It is not safe for concurrent use.
-type Conn struct {
-	fe, be  stream
-	stmts   map[string]string
-	stmtTr  map[string]bool
-	portals map[string]string
-	groups  []*group
-	open    *group // extended group collecting Executes until Sync
+type portal struct {
+	stmt string
+	bind []byte // Bind body after the statement name
 }
 
-func NewConn() *Conn {
+// Conn tracks one connection. It is not safe for concurrent use.
+type Conn struct {
+	feDir   event.Dir // direction carrying frontend (client→server) messages
+	fe, be  stream
+	params  map[string]string
+	stmts   map[string]string
+	stmtTr  map[string]bool
+	portals map[string]portal
+	groups  []*group
+	open    *group // extended group collecting Executes until Sync
+	nextID  uint64
+}
+
+// NewConn parses a pgbouncer→postgres connection: pgbouncer sends the
+// frontend messages.
+func NewConn() *Conn { return newConn(event.DirSend) }
+
+// NewClientConn parses a client→pgbouncer connection: pgbouncer receives the
+// frontend messages.
+func NewClientConn() *Conn { return newConn(event.DirRecv) }
+
+func newConn(feDir event.Dir) *Conn {
 	return &Conn{
+		feDir:   feDir,
 		fe:      stream{frontend: true},
+		params:  map[string]string{},
 		stmts:   map[string]string{},
 		stmtTr:  map[string]bool{},
-		portals: map[string]string{},
+		portals: map[string]portal{},
 	}
 }
 
-// Feed consumes one captured chunk and returns queries completed by it.
-func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) []Query {
-	if dir == event.DirSend {
+// Params returns the startup parameters (user, database, ...) if the startup
+// packet was seen.
+func (c *Conn) Params() map[string]string { return c.params }
+
+// Feed consumes one captured chunk.
+func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) Result {
+	var r Result
+	if dir == c.feDir {
 		msgs, desync := c.fe.feed(payload, int(totalLen))
 		if desync {
 			c.forget()
 		}
 		for _, m := range msgs {
-			c.frontend(ts, m)
+			c.frontend(ts, m, &r)
 		}
-		return nil
+		return r
 	}
 	msgs, desync := c.be.feed(payload, int(totalLen))
-	var out []Query
 	for _, m := range msgs {
-		out = c.backend(ts, m, out)
+		c.backend(ts, m, &r)
 	}
 	if desync {
 		c.forget()
 	}
-	return out
+	return r
 }
 
 // forget drops in-flight queries after a stream lost its place.
@@ -80,40 +123,57 @@ func (c *Conn) forget() {
 	c.groups, c.open = nil, nil
 }
 
-func (c *Conn) frontend(ts uint64, m msg) {
+func (c *Conn) start(q *Query, r *Result) {
+	c.nextID++
+	q.ID = c.nextID
+	r.Started = append(r.Started, Start{ID: q.ID, Sig: q.Sig, BindSig: q.BindSig, SQLKnown: q.SQLKnown, TS: q.Start, SQL: q.SQL})
+}
+
+func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 	switch m.typ {
 	case 0:
-		if m.startupCode == codeSSL || m.startupCode == codeGSSEnc {
+		switch m.startupCode {
+		case codeSSL, codeGSSEnc:
 			c.be.synced, c.be.expectSSL = true, true
+		case codeProtocol3:
+			for b := m.body; len(b) > 0 && b[0] != 0; {
+				var k, v string
+				k, b = cstring(b)
+				v, b = cstring(b)
+				c.params[k] = v
+			}
 		}
 	case 'Q':
 		sql, _ := cstring(m.body)
 		c.open = nil
-		c.groups = append(c.groups, &group{simple: true, queries: []*Query{
-			{Start: ts, SQL: sql, Protocol: "simple", Truncated: m.truncated},
-		}})
+		q := &Query{Start: ts, SQL: sql, Protocol: "simple", Truncated: m.truncated, Sig: hash(sql), SQLKnown: true}
+		c.groups = append(c.groups, &group{simple: true, queries: []*Query{q}})
+		c.start(q, r)
 	case 'P':
 		name, rest := cstring(m.body)
 		sql, _ := cstring(rest)
 		c.stmts[name], c.stmtTr[name] = sql, m.truncated
 	case 'B':
-		portal, rest := cstring(m.body)
-		stmt, _ := cstring(rest)
-		c.portals[portal] = stmt
+		name, rest := cstring(m.body)
+		stmt, rest := cstring(rest)
+		c.portals[name] = portal{stmt: stmt, bind: clone(rest)}
 	case 'E':
-		portal, _ := cstring(m.body)
-		stmt := c.portals[portal]
-		sql, ok := c.stmts[stmt]
-		if !ok {
-			sql = fmt.Sprintf("<unknown prepared statement %q>", stmt)
+		name, _ := cstring(m.body)
+		p := c.portals[name]
+		sql, known := c.stmts[p.stmt]
+		if !known {
+			sql = fmt.Sprintf("<unknown prepared statement %q>", p.stmt)
 		}
 		if c.open == nil {
 			c.open = &group{}
 			c.groups = append(c.groups, c.open)
 		}
-		c.open.queries = append(c.open.queries, &Query{
-			Start: ts, SQL: sql, Protocol: "extended", Truncated: c.stmtTr[stmt],
-		})
+		q := &Query{
+			Start: ts, SQL: sql, Protocol: "extended", Truncated: c.stmtTr[p.stmt],
+			Sig: hash(sql, p.bind), BindSig: hash(p.bind), SQLKnown: known,
+		}
+		c.open.queries = append(c.open.queries, q)
+		c.start(q, r)
 	case 'S':
 		if c.open == nil {
 			c.groups = append(c.groups, &group{})
@@ -132,7 +192,7 @@ func (c *Conn) frontend(ts uint64, m msg) {
 	}
 }
 
-func (c *Conn) backend(ts uint64, m msg, out []Query) []Query {
+func (c *Conn) backend(ts uint64, m msg, r *Result) {
 	var g *group
 	var q *Query
 	if len(c.groups) > 0 {
@@ -150,12 +210,12 @@ func (c *Conn) backend(ts uint64, m msg, out []Query) []Query {
 		q.CommandTag = tag
 		q.Rows += tagRows(tag)
 		if !g.simple {
-			out = c.finish(q, ts, out)
+			q.End = ts
 			g.next++
 		}
 	case 'I', 's': // EmptyQueryResponse, PortalSuspended complete an Execute
 		if q != nil && !g.simple && !g.failed {
-			out = c.finish(q, ts, out)
+			q.End = ts
 			g.next++
 		}
 	case 'E':
@@ -164,28 +224,51 @@ func (c *Conn) backend(ts uint64, m msg, out []Query) []Query {
 		}
 		q.ErrorCode, q.ErrorMessage = errorFields(m.body)
 		if !g.simple {
-			out = c.finish(q, ts, out)
+			q.End = ts
+			g.next++
 			g.failed = true // postgres skips the rest until Sync
 		}
 	case 'Z':
 		if g == nil {
 			break
 		}
-		if g.simple && q != nil {
-			out = c.finish(q, ts, out)
+		status := byte(0)
+		if len(m.body) > 0 {
+			status = m.body[0]
+		}
+		// Queries are reported when their group ends, so each carries the
+		// transaction status the server is left in.
+		for i, gq := range g.queries {
+			if g.simple {
+				gq.End = ts
+			} else if i >= g.next {
+				break // not executed: an earlier Execute failed
+			}
+			gq.TxStatus = status
+			gq.Operation = operation(gq.SQL, gq.CommandTag)
+			r.Done = append(r.Done, *gq)
 		}
 		c.groups = c.groups[1:]
 		if g == c.open {
 			c.open = nil
 		}
 	}
-	return out
 }
 
-func (c *Conn) finish(q *Query, ts uint64, out []Query) []Query {
-	q.End = ts
-	q.Operation = operation(q.SQL, q.CommandTag)
-	return append(out, *q)
+func hash(parts ...any) uint64 {
+	h := fnv.New64a()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		switch v := p.(type) {
+		case string:
+			h.Write([]byte(v))
+		case []byte:
+			h.Write(v)
+		}
+	}
+	return h.Sum64()
 }
 
 // cstring splits a NUL-terminated string off b. A missing terminator (truncated

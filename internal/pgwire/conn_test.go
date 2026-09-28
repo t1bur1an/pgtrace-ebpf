@@ -13,9 +13,19 @@ const (
 	R = event.DirRecv
 )
 
+// core drops the correlation fields so tests can compare query content.
+func core(qs []Query) []Query {
+	out := make([]Query, len(qs))
+	for i, q := range qs {
+		q.ID, q.Sig, q.BindSig, q.SQLKnown, q.TxStatus = 0, 0, 0, false, 0
+		out[i] = q
+	}
+	return out
+}
+
 // feed sends each chunk whole (payload == total).
 func feed(c *Conn, dir event.Dir, ts uint64, b []byte) []Query {
-	return c.Feed(dir, ts, b, uint32(len(b)))
+	return c.Feed(dir, ts, b, uint32(len(b))).Done
 }
 
 func TestSimpleQuery(t *testing.T) {
@@ -23,7 +33,7 @@ func TestSimpleQuery(t *testing.T) {
 	if got := feed(c, S, 100, fQuery("SELECT 1")); len(got) != 0 {
 		t.Fatalf("premature emit: %+v", got)
 	}
-	got := feed(c, R, 250, cat(selectResult(1), bReady()))
+	got := core(feed(c, R, 250, cat(selectResult(1), bReady())))
 	want := []Query{{Start: 100, End: 250, SQL: "SELECT 1", Operation: "SELECT", CommandTag: "SELECT 1", Rows: 1, Protocol: "simple"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -56,7 +66,7 @@ func TestExtendedNamedAndUnnamed(t *testing.T) {
 	c := NewConn()
 	sql := "select * from t where id=$1"
 	feed(c, S, 5, cat(fParse("s1", sql), fBind("", "s1"), fDescribe(""), fExecute(""), fSync()))
-	got := feed(c, R, 9, cat(bParseDone(), bBindDone(), bRowDesc(), bRow("a"), bRow("b"), bComplete("SELECT 2"), bReady()))
+	got := core(feed(c, R, 9, cat(bParseDone(), bBindDone(), bRowDesc(), bRow("a"), bRow("b"), bComplete("SELECT 2"), bReady())))
 	want := []Query{{Start: 5, End: 9, SQL: sql, Operation: "SELECT", CommandTag: "SELECT 2", Rows: 2, Protocol: "extended"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -138,13 +148,13 @@ func TestFragmentedByteByByte(t *testing.T) {
 	fe, be := threeQueries()
 	c := NewConn()
 	for i := range fe {
-		if got := c.Feed(S, 1, fe[i:i+1], 1); len(got) != 0 {
+		if got := c.Feed(S, 1, fe[i:i+1], 1).Done; len(got) != 0 {
 			t.Fatalf("unexpected emit")
 		}
 	}
 	var got []Query
 	for i := range be {
-		got = append(got, c.Feed(R, 2, be[i:i+1], 1)...)
+		got = append(got, c.Feed(R, 2, be[i:i+1], 1).Done...)
 	}
 	if len(got) != 3 || got[0].SQL != "select a" || got[2].SQL != "select c" || got[1].Rows != 2 {
 		t.Fatalf("got %+v", got)
@@ -166,7 +176,7 @@ func TestTruncatedPayload(t *testing.T) {
 	long := "insert into t values ('" + strings.Repeat("x", 10000) + "')"
 	msg := fQuery(long)
 	// Kernel captured only the first 4096 bytes of the syscall.
-	if got := c.Feed(S, 1, msg[:4096], uint32(len(msg))); len(got) != 0 {
+	if got := c.Feed(S, 1, msg[:4096], uint32(len(msg))).Done; len(got) != 0 {
 		t.Fatalf("unexpected emit %+v", got)
 	}
 	got := feed(c, R, 2, cat(bComplete("INSERT 0 1"), bReady()))
@@ -260,7 +270,7 @@ func TestHugeMessagesAreNotBuffered(t *testing.T) {
 	var got []Query
 	for i := 0; i < len(be); i += 4096 {
 		chunk := be[i:min(i+4096, len(be))]
-		got = append(got, c.Feed(R, 2, chunk, uint32(len(chunk)))...)
+		got = append(got, c.Feed(R, 2, chunk, uint32(len(chunk))).Done...)
 		maxBuf = max(maxBuf, cap(c.be.buf))
 	}
 	if maxBuf > 256<<10 {
