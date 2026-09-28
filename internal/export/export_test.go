@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/t1bur1an/pgtrace/internal/correlate"
+	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
@@ -109,5 +111,83 @@ func TestExportErrorAndTruncation(t *testing.T) {
 	}
 	if s.Name != "query" {
 		t.Fatalf("fallback name %q", s.Name)
+	}
+}
+
+func TestExportTrace(t *testing.T) {
+	e, mem := newTest(t)
+	client := event.ConnKey{PID: 42, FD: 11}
+	server := event.ConnKey{PID: 42, FD: 7}
+	tr := correlate.Trace{
+		Client: &correlate.ClientQuery{Key: client, Q: pgwire.Query{
+			Start: uint64(monoNow - 10_000_000), End: uint64(monoNow - 1_000_000),
+			SQL: "select 1", Operation: "SELECT", Protocol: "simple", Rows: 1,
+		}},
+		Server: []correlate.ServerQuery{
+			{Key: server, Correlation: "exact", Internal: true, Q: pgwire.Query{Start: uint64(monoNow - 8_000_000), End: uint64(monoNow - 7_000_000), SQL: "SET application_name='x'", Operation: "SET"}},
+			{Key: server, Correlation: "exact", Q: pgwire.Query{Start: uint64(monoNow - 6_000_000), End: uint64(monoNow - 2_000_000), SQL: "select 1", Operation: "SELECT", ErrorCode: "40001", ErrorMessage: "serialization"}},
+		},
+	}
+	info := ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "alice", "database": "shop", "application_name": "api"}}
+	e.ExportTrace(tr, sampler.ReasonError, info, func(event.ConnKey) netip.AddrPort { return netip.MustParseAddrPort("10.0.0.2:5432") })
+
+	spans := mem.GetSpans()
+	if len(spans) != 3 {
+		t.Fatalf("got %d spans", len(spans))
+	}
+	var root tracetest.SpanStub
+	var children []tracetest.SpanStub
+	for _, s := range spans {
+		if s.SpanKind == trace.SpanKindServer {
+			root = s
+		} else {
+			children = append(children, s)
+		}
+	}
+	for _, c := range children {
+		if c.Parent.SpanID() != root.SpanContext.SpanID() || c.SpanContext.TraceID() != root.SpanContext.TraceID() {
+			t.Fatalf("child not under root: %+v", c.Parent)
+		}
+	}
+	ra := attrs(root.Attributes)
+	if ra["client.address"].AsString() != "10.0.0.9" || ra["client.port"].AsInt64() != 40000 ||
+		ra["db.namespace"].AsString() != "shop" || ra["db.user"].AsString() != "alice" || ra["application_name"].AsString() != "api" ||
+		ra["pgbouncer.client_fd"].AsInt64() != 11 || ra["pgtrace.correlation"].AsString() != "exact" {
+		t.Fatalf("root attrs %v", ra)
+	}
+	if ra["pgbouncer.pool_wait_ms"].AsFloat64() != 2 {
+		t.Fatalf("pool wait %v", ra["pgbouncer.pool_wait_ms"])
+	}
+	if root.Name != "SELECT" || !root.StartTime.Equal(time.Unix(0, wallNow-10_000_000)) {
+		t.Fatalf("root %q %v", root.Name, root.StartTime)
+	}
+	var internal, failed int
+	for _, c := range children {
+		a := attrs(c.Attributes)
+		if a["pgbouncer.internal"].AsBool() {
+			internal++
+		}
+		if c.Status.Code == codes.Error {
+			failed++
+		}
+		if a["pgtrace.correlation"].AsString() != "exact" || a["server.port"].AsInt64() != 5432 {
+			t.Fatalf("child attrs %v", a)
+		}
+	}
+	if internal != 1 || failed != 1 {
+		t.Fatalf("internal=%d failed=%d", internal, failed)
+	}
+}
+
+func TestExportUncorrelated(t *testing.T) {
+	e, mem := newTest(t)
+	tr := correlate.Trace{Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 7}, Correlation: "none", Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1", Operation: "SELECT"}}}}
+	e.ExportTrace(tr, sampler.ReasonRatio, ClientInfo{}, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
+	spans := mem.GetSpans()
+	if len(spans) != 1 || spans[0].SpanKind != trace.SpanKindClient || spans[0].Parent.IsValid() {
+		t.Fatalf("got %+v", spans)
+	}
+	if attrs(spans[0].Attributes)["pgtrace.correlation"].AsString() != "none" {
+		t.Fatal("missing correlation attr")
 	}
 }

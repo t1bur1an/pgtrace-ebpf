@@ -15,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 
+	"github.com/t1bur1an/pgtrace/internal/correlate"
+	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
@@ -76,11 +78,65 @@ func clocks() (mono, wall int64) {
 func (e *Exporter) wall(mono uint64) time.Time { return time.Unix(0, int64(mono)+e.offset) }
 
 func (e *Exporter) Export(s Span) {
-	q := s.Q
-	name := q.Operation
-	if name == "" {
-		name = "query"
+	e.span(context.Background(), trace.SpanKindClient, s.Q, serverAttrs(s))
+}
+
+// ClientInfo describes the client connection of a trace's root query.
+type ClientInfo struct {
+	Addr   netip.AddrPort    // invalid for unix sockets or unknown
+	Params map[string]string // startup parameters, if seen
+}
+
+// ExportTrace exports a client query as a SERVER span (pgbouncer serving the
+// client) with its server queries as CLIENT child spans. Traces without a
+// client query export each server query as its own trace.
+func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
+	child := func(ctx context.Context, sq correlate.ServerQuery) {
+		attrs := append(serverAttrs(Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: server(sq.Key), Reason: reason}),
+			attribute.String("pgtrace.correlation", sq.Correlation),
+			attribute.Bool("pgbouncer.internal", sq.Internal))
+		e.span(ctx, trace.SpanKindClient, sq.Q, attrs)
 	}
+	if t.Client == nil {
+		for _, sq := range t.Server {
+			child(context.Background(), sq)
+		}
+		return
+	}
+
+	q := t.Client.Q
+	corr := correlate.None
+	if len(t.Server) > 0 {
+		corr = t.Server[0].Correlation
+	}
+	attrs := append(queryAttrs(q, reason),
+		attribute.Int64("pgbouncer.pid", int64(t.Client.Key.PID)),
+		attribute.Int64("pgbouncer.client_fd", int64(t.Client.Key.FD)),
+		attribute.String("pgtrace.correlation", corr))
+	if client.Addr.IsValid() {
+		attrs = append(attrs,
+			attribute.String("client.address", client.Addr.Addr().String()),
+			attribute.Int("client.port", int(client.Addr.Port())))
+	}
+	for key, attr := range map[string]string{"database": "db.namespace", "user": "db.user", "application_name": "application_name"} {
+		if v := client.Params[key]; v != "" {
+			attrs = append(attrs, attribute.String(attr, v))
+		}
+	}
+	// Pool wait ends when pgbouncer first talks to the server it was given,
+	// which may be an internal parameter sync before the forwarded query.
+	if len(t.Server) > 0 && t.Server[0].Q.Start >= q.Start {
+		attrs = append(attrs, attribute.Float64("pgbouncer.pool_wait_ms", float64(t.Server[0].Q.Start-q.Start)/1e6))
+	}
+	ctx, end := e.start(context.Background(), trace.SpanKindServer, q, attrs)
+	for _, sq := range t.Server {
+		child(ctx, sq)
+	}
+	end()
+}
+
+// queryAttrs are the attributes shared by client and server query spans.
+func queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
 	text := q.SQL
 	if len(text) > maxQueryText {
 		text = text[:maxQueryText]
@@ -91,29 +147,48 @@ func (e *Exporter) Export(s Span) {
 		attribute.String("db.query.text", text),
 		attribute.String("db.operation.name", q.Operation),
 		attribute.Int64("db.response.returned_rows", q.Rows),
-		attribute.Int64("pgbouncer.pid", int64(s.PID)),
-		attribute.Int64("pgbouncer.server_fd", int64(s.FD)),
 		attribute.String("pgtrace.protocol", q.Protocol),
 		attribute.String("pgtrace.command_tag", q.CommandTag),
 		attribute.Bool("pgtrace.truncated", q.Truncated),
-		attribute.String("pgtrace.sample_reason", string(s.Reason)),
+		attribute.String("pgtrace.sample_reason", string(reason)),
 	}
+	if q.ErrorCode != "" {
+		attrs = append(attrs, attribute.String("db.response.status_code", q.ErrorCode))
+	}
+	return attrs
+}
+
+func serverAttrs(s Span) []attribute.KeyValue {
+	attrs := append(queryAttrs(s.Q, s.Reason),
+		attribute.Int64("pgbouncer.pid", int64(s.PID)),
+		attribute.Int64("pgbouncer.server_fd", int64(s.FD)))
 	if s.Remote.IsValid() {
 		attrs = append(attrs,
 			attribute.String("server.address", s.Remote.Addr().String()),
 			attribute.Int("server.port", int(s.Remote.Port())))
 	}
-	if q.ErrorCode != "" {
-		attrs = append(attrs, attribute.String("db.response.status_code", q.ErrorCode))
+	return attrs
+}
+
+// start opens a span for q and returns its context and a func ending it.
+func (e *Exporter) start(ctx context.Context, kind trace.SpanKind, q pgwire.Query, attrs []attribute.KeyValue) (context.Context, func()) {
+	name := q.Operation
+	if name == "" {
+		name = "query"
 	}
-	_, span := e.tracer.Start(context.Background(), name,
-		trace.WithSpanKind(trace.SpanKindClient),
+	ctx, span := e.tracer.Start(ctx, name,
+		trace.WithSpanKind(kind),
 		trace.WithTimestamp(e.wall(q.Start)),
 		trace.WithAttributes(attrs...))
 	if q.ErrorCode != "" {
 		span.SetStatus(codes.Error, q.ErrorMessage)
 	}
-	span.End(trace.WithTimestamp(e.wall(q.End)))
+	return ctx, func() { span.End(trace.WithTimestamp(e.wall(q.End))) }
+}
+
+func (e *Exporter) span(ctx context.Context, kind trace.SpanKind, q pgwire.Query, attrs []attribute.KeyValue) {
+	_, end := e.start(ctx, kind, q, attrs)
+	end()
 }
 
 func (e *Exporter) Shutdown(ctx context.Context) error { return e.tp.Shutdown(ctx) }

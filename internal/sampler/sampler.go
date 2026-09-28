@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/t1bur1an/pgtrace/internal/correlate"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 )
 
@@ -39,14 +40,35 @@ func New(ratio float64, slow time.Duration, seed uint64) *Sampler {
 }
 
 func (s *Sampler) Decide(q pgwire.Query) (bool, Reason) {
+	return s.decide(q.ErrorCode != "", q)
+}
+
+// DecideTrace samples a whole trace: an error anywhere or a slow root keeps it.
+// The root is the client query, or the first server query when there is none.
+func (s *Sampler) DecideTrace(t correlate.Trace) (bool, Reason) {
+	var root pgwire.Query
+	failed := false
+	if t.Client != nil {
+		root = t.Client.Q
+		failed = root.ErrorCode != ""
+	} else if len(t.Server) > 0 {
+		root = t.Server[0].Q
+	}
+	for _, c := range t.Server {
+		failed = failed || c.Q.ErrorCode != ""
+	}
+	return s.decide(failed, root)
+}
+
+func (s *Sampler) decide(failed bool, root pgwire.Query) (bool, Reason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats["seen"]++
 	r := ReasonNone
 	switch {
-	case q.ErrorCode != "":
+	case failed:
 		r = ReasonError
-	case q.End >= q.Start && time.Duration(q.End-q.Start) >= s.slow:
+	case root.End >= root.Start && time.Duration(root.End-root.Start) >= s.slow:
 		r = ReasonSlow
 	case s.ratio > 0 && s.rng.Float64() < s.ratio:
 		r = ReasonRatio
