@@ -1,0 +1,1 @@
+spans kept by agent (logged): 4119410, spans stored in VictoriaTraces: 4119410

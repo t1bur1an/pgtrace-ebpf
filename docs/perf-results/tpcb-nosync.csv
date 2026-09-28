@@ -1,0 +1,13 @@
+rep,workload,mode,clients,agent,ratio,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_mem_mb,queries_per_s,kept,kernel_drops,bpf_ns_per_run,bpf_runs_per_query
+1,tpcb-simple,simple,8,off,,15150.989255,0.528,61.2,,,,,,,
+1,tpcb-simple,simple,8,on,0.1,13266.972049,0.603,64.1,27.3,60.7,92843,185733,0,94,10.02
+1,tpcb-simple,simple,32,off,,14191.659399,2.255,60.9,,,,,,,
+1,tpcb-simple,simple,32,on,0.1,12806.237641,2.499,64.0,26.9,61.8,89558,178179,0,93,10.16
+2,tpcb-simple,simple,8,off,,14854.919505,0.539,60.4,,,,,,,
+2,tpcb-simple,simple,8,on,0.1,13271.265127,0.603,64.2,27.2,63.1,92875,185312,0,94,10.02
+2,tpcb-simple,simple,32,off,,14254.192781,2.245,60.7,,,,,,,
+2,tpcb-simple,simple,32,on,0.1,12787.085112,2.503,63.9,27.4,59.9,89430,179430,0,94,10.16
+3,tpcb-simple,simple,8,off,,14949.294772,0.535,61.1,,,,,,,
+3,tpcb-simple,simple,8,on,0.1,13261.928744,0.603,64.2,27.4,63.4,92810,185148,0,94,10.02
+3,tpcb-simple,simple,32,off,,14183.290366,2.256,60.8,,,,,,,
+3,tpcb-simple,simple,32,on,0.1,12748.401683,2.510,63.9,27.4,62.6,89158,178467,0,94,10.16

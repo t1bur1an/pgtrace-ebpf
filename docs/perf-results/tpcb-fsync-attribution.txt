@@ -1,0 +1,9 @@
+rep1 off tps=6040
+rep1 r0 tps=6253
+rep1 r01 tps=1586
+rep2 off tps=1586
+rep2 r0 tps=1584
+rep2 r01 tps=1588
+rep3 off tps=1590
+rep3 r0 tps=1588
+rep3 r01 tps=2997

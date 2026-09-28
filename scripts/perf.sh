@@ -4,6 +4,7 @@
 # docs/perf-results/.
 #
 #   DURATION=20 CLIENTS="1 8 32 64" ./scripts/perf.sh
+#   SKIP_MATRIX=1 ./scripts/perf.sh   # only the repeat + breakdown sections
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/deploy"
@@ -18,7 +19,10 @@ export BUILDX_BUILDER=${BUILDX_BUILDER:-default}
 export PGTRACE_STATS_INTERVAL=2s PGTRACE_BPF_STATS=${PGTRACE_BPF_STATS:-true}
 mkdir -p "$OUT"
 csv="$OUT/results.csv"
-echo "workload,mode,clients,agent,ratio,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_mem_mb,queries_per_s,kept,kernel_drops,bpf_ns_per_run,bpf_runs_per_query" > "$csv"
+SKIP_MATRIX=${SKIP_MATRIX:-0}
+REPEATS=${REPEATS:-3}
+header="workload,mode,clients,agent,ratio,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_mem_mb,queries_per_s,kept,kernel_drops,bpf_ns_per_run,bpf_runs_per_query"
+[ "$SKIP_MATRIX" = 1 ] || echo "$header" > "$csv"
 
 cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 cpu_usec() { awk '/^usage_usec/ {print $2}' "$(cg "$1")/cpu.stat"; }
@@ -97,6 +101,7 @@ PY
 	echo "$wl,$mode,$c,$on,$ratio,$tps,$lat,$pgbcpu,$agcpu,$mem,$qps,$kept,$drops,$bpfns,$bpfrq" | tee -a "$csv"
 }
 
+if [ "$SKIP_MATRIX" != 1 ]; then
 for wl in $WORKLOADS; do
 	for c in $CLIENTS; do
 		run_case "$wl" "$c" off ""
@@ -115,4 +120,61 @@ sleep 5
 kept_total=$(awk -F, 'NR > 1 && $4 == "on" {s += $12} END {print s}' "$csv")
 vt_total=$(curl -fsS "$VT/select/logsql/query" --data-urlencode 'query=name:* | stats count() n' | python3 -c 'import json,sys; print(json.load(sys.stdin)["n"])')
 echo "spans kept by agent (logged): $kept_total, spans stored in VictoriaTraces: $vt_total" | tee "$OUT/completeness.txt"
-echo "results: $csv"
+fi
+
+if [ "${SKIP_REPEATS:-0}" != 1 ]; then
+echo "== repeats: alternating off/on, $REPEATS reps (noise check)"
+csv="$OUT/repeats.csv"
+echo "rep,$header" > "$csv"
+for rep in $(seq 1 "$REPEATS"); do
+	for c in 8 32; do
+		for on in off on; do
+			printf '%s,' "$rep" >> "$csv"
+			run_case tpcb-simple "$c" "$on" "$([ $on = on ] && echo 0.1)"
+		done
+	done
+	for on in off on; do
+		printf '%s,' "$rep" >> "$csv"
+		run_case select-simple 8 "$on" "$([ $on = on ] && echo 0.1)"
+	done
+done
+
+fi
+
+if [ "${SKIP_NOSYNC:-0}" != 1 ]; then
+# Write-heavy workload without commit fsyncs/checkpoints in the way, so the
+# result reflects CPU overhead rather than storage variance.
+echo "== tpcb with synchronous_commit=off, $REPEATS reps"
+docker compose run --rm -T loadgen sh -c "psql -qc 'ALTER SYSTEM SET synchronous_commit = off' && psql -qc 'ALTER SYSTEM SET max_wal_size = \"20GB\"' && psql -qc 'ALTER SYSTEM SET checkpoint_timeout = \"1h\"' && psql -qc 'SELECT pg_reload_conf()' && psql -qc 'CHECKPOINT'" >/dev/null
+csv="$OUT/tpcb-nosync.csv"
+echo "rep,$header" > "$csv"
+for rep in $(seq 1 "$REPEATS"); do
+	for c in 8 32; do
+		for on in off on; do
+			printf '%s,' "$rep" >> "$csv"
+			run_case tpcb-simple "$c" "$on" "$([ $on = on ] && echo 0.1)"
+		done
+	done
+done
+docker compose run --rm -T loadgen sh -c "psql -qc 'ALTER SYSTEM RESET ALL' && psql -qc 'SELECT pg_reload_conf()'" >/dev/null
+fi
+
+if [ "${SKIP_BREAKDOWN:-0}" != 1 ]; then
+echo "== overhead breakdown (select-simple, 8 clients, ${DURATION}s, $REPEATS reps)"
+bd="$OUT/breakdown.csv"
+echo "rep,config,tps" > "$bd"
+for rep in $(seq 1 "$REPEATS"); do
+	for cfg in off attached-idle traced traced+bpf-stats; do
+		agent_off
+		case $cfg in
+			attached-idle) agent_on 0.1 __nothing__ false ;;
+			traced) agent_on 0.1 pgbouncer false ;;
+			traced+bpf-stats) agent_on 0.1 pgbouncer true ;;
+		esac
+		tps=$(docker compose run --rm -T loadgen pgbench -S -M simple -c 8 -j 8 -T "$DURATION" -n 2>&1 | sed -nE 's/^tps = ([0-9.]+).*/\1/p')
+		echo "$rep,$cfg,$tps" | tee -a "$bd"
+	done
+done
+agent_off
+fi
+echo "results in $OUT"

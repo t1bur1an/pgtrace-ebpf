@@ -1,0 +1,13 @@
+rep,config,tps
+1,off,106575.454168
+1,attached-idle,102985.995920
+1,traced,94830.122228
+1,traced+bpf-stats,93250.290455
+2,off,106367.216866
+2,attached-idle,102655.557885
+2,traced,94287.844124
+2,traced+bpf-stats,93496.667474
+3,off,106817.509939
+3,attached-idle,102364.297012
+3,traced,94110.000354
+3,traced+bpf-stats,93227.370512
