@@ -41,8 +41,16 @@ type Start struct {
 
 // Result is what one Feed call produced.
 type Result struct {
-	Started []Start
-	Done    []Query
+	Started   []Start
+	Done      []Query
+	Truncated int // messages cut at Options.MaxMessage
+}
+
+// Options tune a Conn.
+type Options struct {
+	// MaxMessage is the most bytes of one message kept (DefaultMaxMessage if
+	// 0). Memory is allocated per message: min(message length, MaxMessage).
+	MaxMessage int
 }
 
 // group is the work between two ReadyForQuery messages: one simple Query, or
@@ -74,16 +82,26 @@ type Conn struct {
 
 // NewConn parses a pgbouncer→postgres connection: pgbouncer sends the
 // frontend messages.
-func NewConn() *Conn { return newConn(event.DirSend) }
+func NewConn() *Conn { return NewConnWith(false, Options{}) }
 
 // NewClientConn parses a client→pgbouncer connection: pgbouncer receives the
 // frontend messages.
-func NewClientConn() *Conn { return newConn(event.DirRecv) }
+func NewClientConn() *Conn { return NewConnWith(true, Options{}) }
 
-func newConn(feDir event.Dir) *Conn {
+// NewConnWith parses a client (client=true) or server connection.
+func NewConnWith(client bool, o Options) *Conn {
+	feDir := event.DirSend
+	if client {
+		feDir = event.DirRecv
+	}
+	keep := o.MaxMessage
+	if keep <= 0 {
+		keep = DefaultMaxMessage
+	}
 	return &Conn{
 		feDir:   feDir,
-		fe:      stream{frontend: true},
+		fe:      stream{frontend: true, keep: keep},
+		be:      stream{keep: keep},
 		params:  map[string]string{},
 		stmts:   map[string]string{},
 		stmtTr:  map[string]bool{},
@@ -104,12 +122,18 @@ func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) R
 			c.forget()
 		}
 		for _, m := range msgs {
+			if m.cut {
+				r.Truncated++
+			}
 			c.frontend(ts, m, &r)
 		}
 		return r
 	}
 	msgs, desync := c.be.feed(payload, int(totalLen))
 	for _, m := range msgs {
+		if m.cut {
+			r.Truncated++
+		}
 		c.backend(ts, m, &r)
 	}
 	if desync {

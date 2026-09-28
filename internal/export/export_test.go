@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
-	"unicode/utf8"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -104,7 +104,7 @@ func TestExportErrorAndTruncation(t *testing.T) {
 		t.Fatalf("status %+v", s.Status)
 	}
 	a := attrs(s.Attributes)
-	if n := len(a["db.query.text"].AsString()); n != maxQueryText {
+	if n := len(a["db.query.text"].AsString()); n != DefaultMaxQueryText {
 		t.Fatalf("query text len %d", n)
 	}
 	if a["db.response.status_code"].AsString() != "22012" || !a["pgtrace.truncated"].AsBool() {
@@ -197,7 +197,7 @@ func TestTruncatedTextIsValidUTF8(t *testing.T) {
 	e, mem := newTest(t)
 	// A multi-byte rune straddles the 2048-byte cut, and the captured SQL
 	// itself ends mid-rune (as when the parser truncates a long message).
-	sql := strings.Repeat("a", maxQueryText-1) + "ж" + "tail"
+	sql := strings.Repeat("a", DefaultMaxQueryText-1) + "ж" + "tail"
 	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: sql}})
 	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select '" + string([]byte("жж")[:3])}})
 	for _, s := range mem.GetSpans() {
@@ -205,8 +205,24 @@ func TestTruncatedTextIsValidUTF8(t *testing.T) {
 		if !utf8.ValidString(v) {
 			t.Fatalf("invalid UTF-8 in db.query.text: %q", v[len(v)-4:])
 		}
-		if len(v) > maxQueryText {
+		if len(v) > DefaultMaxQueryText {
 			t.Fatalf("text longer than cap: %d", len(v))
 		}
+	}
+}
+
+func TestMaxQueryTextOption(t *testing.T) {
+	mem := tracetest.NewInMemoryExporter()
+	cut := 0
+	e := newWithSpanExporter(mem, "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
+	e.SetOptions(Options{MaxQueryText: 100, OnTruncate: func() { cut++ }})
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: strings.Repeat("s", 500)}})
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "short"}})
+	spans := mem.GetSpans()
+	if n := len(attrs(spans[0].Attributes)["db.query.text"].AsString()); n != 100 {
+		t.Fatalf("len %d", n)
+	}
+	if cut != 1 {
+		t.Fatalf("truncation hook called %d times", cut)
 	}
 }

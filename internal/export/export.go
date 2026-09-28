@@ -23,7 +23,6 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
 
-const maxQueryText = 2048
 
 // Span is a kept query plus the connection it was seen on.
 type Span struct {
@@ -38,6 +37,24 @@ type Exporter struct {
 	tp     *sdktrace.TracerProvider
 	tracer trace.Tracer
 	offset int64 // wall - monotonic, ns
+	opts   Options
+}
+
+// Options tune what goes into spans.
+type Options struct {
+	MaxQueryText int    // db.query.text length cap (DefaultMaxQueryText if 0)
+	OnTruncate   func() // called when db.query.text is shortened
+}
+
+// DefaultMaxQueryText is the default db.query.text cap in bytes.
+const DefaultMaxQueryText = 2048
+
+// SetOptions must be called before exporting.
+func (e *Exporter) SetOptions(o Options) {
+	if o.MaxQueryText <= 0 {
+		o.MaxQueryText = DefaultMaxQueryText
+	}
+	e.opts = o
 }
 
 // New exports over OTLP/HTTP to endpoint, a full URL such as
@@ -68,7 +85,8 @@ func build(sp sdktrace.SpanProcessor, service string, clock func() (mono, wall i
 		sdktrace.WithSampler(sdktrace.AlwaysSample()), // sampling is done upstream
 	)
 	mono, wall := clock()
-	return &Exporter{tp: tp, tracer: tp.Tracer("github.com/t1bur1an/pgtrace"), offset: wall - mono}
+	return &Exporter{tp: tp, tracer: tp.Tracer("github.com/t1bur1an/pgtrace"), offset: wall - mono,
+		opts: Options{MaxQueryText: DefaultMaxQueryText}}
 }
 
 func clocks() (mono, wall int64) {
@@ -80,7 +98,7 @@ func clocks() (mono, wall int64) {
 func (e *Exporter) wall(mono uint64) time.Time { return time.Unix(0, int64(mono)+e.offset) }
 
 func (e *Exporter) Export(s Span) {
-	e.span(context.Background(), trace.SpanKindClient, s.Q, serverAttrs(s))
+	e.span(context.Background(), trace.SpanKindClient, s.Q, e.serverAttrs(s))
 }
 
 // ClientInfo describes the client connection of a trace's root query.
@@ -94,7 +112,7 @@ type ClientInfo struct {
 // client query export each server query as its own trace.
 func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
 	child := func(ctx context.Context, sq correlate.ServerQuery) {
-		attrs := append(serverAttrs(Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: server(sq.Key), Reason: reason}),
+		attrs := append(e.serverAttrs(Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: server(sq.Key), Reason: reason}),
 			attribute.String("pgtrace.correlation", sq.Correlation),
 			attribute.Bool("pgbouncer.internal", sq.Internal))
 		e.span(ctx, trace.SpanKindClient, sq.Q, attrs)
@@ -111,7 +129,7 @@ func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client 
 	if len(t.Server) > 0 {
 		corr = t.Server[0].Correlation
 	}
-	attrs := append(queryAttrs(q, reason),
+	attrs := append(e.queryAttrs(q, reason),
 		attribute.Int64("pgbouncer.pid", int64(t.Client.Key.PID)),
 		attribute.Int64("pgbouncer.client_fd", int64(t.Client.Key.FD)),
 		attribute.String("pgtrace.correlation", corr))
@@ -152,8 +170,11 @@ func clean(s string, max int) string {
 }
 
 // queryAttrs are the attributes shared by client and server query spans.
-func queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
-	text := clean(q.SQL, maxQueryText)
+func (e *Exporter) queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
+	text := clean(q.SQL, e.opts.MaxQueryText)
+	if len(q.SQL) > e.opts.MaxQueryText && e.opts.OnTruncate != nil {
+		e.opts.OnTruncate()
+	}
 	attrs := []attribute.KeyValue{
 		attribute.String("db.system", "postgresql"),
 		attribute.String("db.system.name", "postgresql"),
@@ -171,8 +192,8 @@ func queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
 	return attrs
 }
 
-func serverAttrs(s Span) []attribute.KeyValue {
-	attrs := append(queryAttrs(s.Q, s.Reason),
+func (e *Exporter) serverAttrs(s Span) []attribute.KeyValue {
+	attrs := append(e.queryAttrs(s.Q, s.Reason),
 		attribute.Int64("pgbouncer.pid", int64(s.PID)),
 		attribute.Int64("pgbouncer.server_fd", int64(s.FD)))
 	if s.Remote.IsValid() {
@@ -194,7 +215,7 @@ func (e *Exporter) start(ctx context.Context, kind trace.SpanKind, q pgwire.Quer
 		trace.WithTimestamp(e.wall(q.Start)),
 		trace.WithAttributes(attrs...))
 	if q.ErrorCode != "" {
-		span.SetStatus(codes.Error, clean(q.ErrorMessage, maxQueryText))
+		span.SetStatus(codes.Error, clean(q.ErrorMessage, DefaultMaxQueryText))
 	}
 	return ctx, func() { span.End(trace.WithTimestamp(e.wall(q.End))) }
 }

@@ -2,11 +2,12 @@ package pgwire
 
 import "encoding/binary"
 
+// DefaultMaxMessage is how much of one message body is kept by default;
+// longer messages are passed on truncated.
+const DefaultMaxMessage = 64 << 10
+
 const (
 	maxMsgLen = 1 << 30
-	// maxKeep bounds how much of one message is buffered; longer messages
-	// are passed on truncated.
-	maxKeep = 64 << 10
 
 	codeProtocol3 = 196608
 	codeSSL       = 80877103
@@ -38,7 +39,8 @@ func typeSet(s string) (t [256]bool) {
 type msg struct {
 	typ         byte
 	body        []byte
-	truncated   bool
+	truncated   bool // body incomplete (kernel capture cap or keep cap)
+	cut         bool // body shortened by the keep cap (counted as a parser truncation)
 	startupCode uint32
 }
 
@@ -46,9 +48,10 @@ type msg struct {
 type stream struct {
 	frontend  bool
 	synced    bool
-	expectSSL bool // backend: next byte is the single-byte SSL/GSS reply
-	buf       []byte
-	discard   int // bytes of a truncated message still to be dropped
+	expectSSL bool   // backend: next byte is the single-byte SSL/GSS reply
+	keep      int    // most bytes of one message kept (header included)
+	buf       []byte // the message in progress; sized once its length is known
+	discard   int    // bytes of the current message still to be skipped
 }
 
 func (s *stream) valid(typ byte) bool {
@@ -85,128 +88,165 @@ func isStartupCode(c uint32) bool {
 	return c == codeProtocol3 || c == codeSSL || c == codeGSSEnc || c == codeCancel
 }
 
+// header returns the header size of the message starting in buf/p: 8 for
+// untyped startup-phase packets, 5 for typed messages.
+func (s *stream) headerSize(first byte) int {
+	if s.frontend && first == 0 {
+		return 8
+	}
+	return 5
+}
+
 // feed consumes one captured syscall chunk. p is the captured prefix of a
 // transfer of total bytes. desync is true when the stream lost its place and
 // was reset; the caller should forget in-flight state.
+//
+// Bytes are consumed exactly: once a message header is known, a buffer of
+// min(message length, keep) is allocated once and filled; the rest of the
+// message, and every message whose body isn't read, is skipped by length.
 func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
-	missing := total - len(p)
-	if missing < 0 {
-		missing = 0
-	}
-	if s.discard > 0 {
-		n := min(s.discard, len(p))
-		p, s.discard = p[n:], s.discard-n
-		if s.discard > 0 {
-			if missing > s.discard {
-				s.reset()
-				return nil, true
-			}
-			s.discard -= missing
-			return nil, false
-		}
-	}
-	s.buf = append(s.buf, p...)
-	if !s.synced {
+	missing := max(total-len(p), 0)
+	if !s.synced && s.discard == 0 {
+		probe := append(s.buf, p...)
 		// Resynchronise only at a chunk start that looks like a message
 		// header; a header split across chunks is buffered until complete.
 		switch {
-		case missing == 0 && len(s.buf) < 8 && len(s.buf) > 0 && (s.valid(s.buf[0]) || s.frontend && s.buf[0] == 0):
-			if len(s.buf) < 5 || s.buf[0] == 0 {
+		case missing == 0 && len(probe) < 8 && len(probe) > 0 && (s.valid(probe[0]) || s.frontend && probe[0] == 0):
+			if len(probe) < 5 || probe[0] == 0 {
+				s.buf = probe
 				return nil, false
 			}
 			fallthrough
 		default:
-			if !s.plausibleStart(s.buf) {
+			if !s.plausibleStart(probe) {
 				s.buf = nil
 				return nil, false
 			}
 		}
-		s.synced = true
+		s.synced, s.buf, p = true, nil, probe
 	}
 
 	for {
-		if s.expectSSL {
-			if len(s.buf) == 0 {
+		if s.discard > 0 {
+			if len(p) == 0 {
 				break
 			}
-			s.buf, s.expectSSL = s.buf[1:], false
+			n := min(s.discard, len(p))
+			p, s.discard = p[n:], s.discard-n
 			continue
 		}
-		if s.frontend && len(s.buf) > 0 && s.buf[0] == 0 {
-			if len(s.buf) < 8 {
+		if s.expectSSL {
+			if len(p) == 0 {
 				break
 			}
-			l := int(binary.BigEndian.Uint32(s.buf[0:4]))
-			code := binary.BigEndian.Uint32(s.buf[4:8])
-			if l < 8 || l > 10000 || !isStartupCode(code) {
+			p, s.expectSSL = p[1:], false
+			continue
+		}
+		if len(s.buf) == 0 && len(p) == 0 {
+			break
+		}
+		// Complete the header.
+		if hdr := s.headerSize(p0(s.buf, p)); len(s.buf) < hdr {
+			n := min(hdr-len(s.buf), len(p))
+			s.buf, p = append(s.buf, p[:n]...), p[n:]
+			if len(s.buf) < hdr {
+				break
+			}
+		}
+		size, keep, ok := s.sizes()
+		if !ok {
+			s.reset()
+			return msgs, true
+		}
+		if keep == 0 { // body not read: report the message, skip its bytes
+			msgs = append(msgs, msg{typ: s.buf[0]})
+			s.discard, s.buf = size-len(s.buf), nil
+			continue
+		}
+		if cap(s.buf) < keep {
+			nb := make([]byte, len(s.buf), keep)
+			copy(nb, s.buf)
+			s.buf = nb
+		}
+		n := min(len(p), keep-len(s.buf))
+		s.buf, p = append(s.buf, p[:n]...), p[n:]
+		if len(s.buf) == size {
+			msgs = append(msgs, s.message(false))
+			s.buf = nil
+			continue
+		}
+		if len(s.buf) == keep { // longer than the keep cap
+			m := s.message(true)
+			m.cut = true
+			msgs = append(msgs, m)
+			s.discard, s.buf = size-keep, nil
+			continue
+		}
+		break // p exhausted mid-message
+	}
+
+	if missing > 0 {
+		// The kernel didn't copy the last `missing` bytes of this chunk. They
+		// are only recoverable if they all belong to the message in progress.
+		switch {
+		case s.discard > 0:
+			if missing > s.discard {
 				s.reset()
 				return msgs, true
 			}
-			if len(s.buf) < l {
-				break
+			s.discard -= missing
+		case len(s.buf) >= 5 && s.buf[0] != 0:
+			size, _, _ := s.sizes()
+			need := size - len(s.buf)
+			if missing > need {
+				s.reset()
+				return msgs, true
 			}
-			msgs = append(msgs, msg{startupCode: code, body: clone(s.buf[8:l])})
-			s.buf = s.buf[l:]
-			continue
-		}
-		if len(s.buf) < 5 {
-			break
-		}
-		typ, l := s.buf[0], int(binary.BigEndian.Uint32(s.buf[1:5]))
-		if !s.valid(typ) || l < 4 || l > maxMsgLen {
+			msgs = append(msgs, s.message(true))
+			s.buf, s.discard = nil, need-missing
+		default:
 			s.reset()
 			return msgs, true
 		}
-		need := s.needBody(typ)
-		if len(s.buf) < 1+l {
-			// Incomplete. Everything buffered belongs to this message, so a
-			// body we don't read (or have read enough of) is emitted now and
-			// its remaining bytes discarded as they arrive.
-			if !need {
-				msgs = append(msgs, msg{typ: typ})
-			} else if len(s.buf) >= maxKeep {
-				msgs = append(msgs, msg{typ: typ, body: clone(s.buf[5:maxKeep]), truncated: true})
-			} else {
-				break
-			}
-			s.discard, s.buf = 1+l-len(s.buf), nil
-			break
-		}
-		m := msg{typ: typ}
-		if need {
-			m.body = clone(s.buf[5 : 1+l])
-		}
-		msgs = append(msgs, m)
-		s.buf = s.buf[1+l:]
-	}
-
-	if missing > 0 && s.discard > 0 {
-		if missing > s.discard {
-			s.reset()
-			return msgs, true
-		}
-		s.discard -= missing
-		missing = 0
-	}
-	if missing > 0 {
-		// The kernel dropped the last `missing` bytes of this chunk. They are
-		// only recoverable if they all belong to the message in progress.
-		if len(s.buf) < 5 || s.buf[0] == 0 {
-			s.reset()
-			return msgs, true
-		}
-		need := 1 + int(binary.BigEndian.Uint32(s.buf[1:5])) - len(s.buf)
-		if missing > need {
-			s.reset()
-			return msgs, true
-		}
-		msgs = append(msgs, msg{typ: s.buf[0], body: clone(s.buf[5:]), truncated: true})
-		s.buf, s.discard = nil, need-missing
-	}
-	if len(s.buf) == 0 {
-		s.buf = nil // release the backing array between messages
 	}
 	return msgs, false
+}
+
+// p0 is the first byte of the message in progress.
+func p0(buf, p []byte) byte {
+	if len(buf) > 0 {
+		return buf[0]
+	}
+	return p[0]
+}
+
+// sizes validates the buffered header and returns the full message size and
+// how many bytes of it to keep (0: body not read).
+func (s *stream) sizes() (size, keep int, ok bool) {
+	if s.frontend && s.buf[0] == 0 {
+		l := int(binary.BigEndian.Uint32(s.buf[0:4]))
+		if l < 8 || l > 10000 || !isStartupCode(binary.BigEndian.Uint32(s.buf[4:8])) {
+			return 0, 0, false
+		}
+		return l, l, true
+	}
+	typ, l := s.buf[0], int(binary.BigEndian.Uint32(s.buf[1:5]))
+	if !s.valid(typ) || l < 4 || l > maxMsgLen {
+		return 0, 0, false
+	}
+	if !s.needBody(typ) {
+		return 1 + l, 0, true
+	}
+	return 1 + l, min(1+l, max(s.keep, 64)), true
+}
+
+// message builds a msg from the buffered bytes. The buffer is handed over
+// (not copied); callers drop their reference.
+func (s *stream) message(truncated bool) msg {
+	if s.frontend && s.buf[0] == 0 {
+		return msg{startupCode: binary.BigEndian.Uint32(s.buf[4:8]), body: s.buf[8:]}
+	}
+	return msg{typ: s.buf[0], body: s.buf[5:], truncated: truncated}
 }
 
 func clone(b []byte) []byte { return append([]byte(nil), b...) }
