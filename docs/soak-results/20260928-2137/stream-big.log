@@ -1,0 +1,200 @@
+ Container pgtrace-loadgen-run-c1c243ed4bc1 Creating 
+ Container pgtrace-loadgen-run-c1c243ed4bc1 Created 
+pgbench (17.11 (Debian 17.11-1.pgdg13+2))
+progress: 60.0 s, 19.6 tps, lat 21.052 ms stddev 147.740, 0 failed, lag 0.240 ms, 2 retried, 3 retries
+progress: 120.0 s, 20.3 tps, lat 24.260 ms stddev 69.865, 0 failed, lag 0.278 ms, 3 retried, 3 retries
+progress: 180.0 s, 18.9 tps, lat 17.788 ms stddev 27.351, 0 failed, lag 0.081 ms, 0 retried, 0 retries
+progress: 240.0 s, 19.6 tps, lat 22.725 ms stddev 68.299, 0 failed, lag 0.110 ms, 1 retried, 1 retries
+progress: 300.0 s, 20.2 tps, lat 22.175 ms stddev 85.087, 0 failed, lag 0.101 ms, 2 retried, 2 retries
+progress: 360.0 s, 20.1 tps, lat 23.090 ms stddev 79.660, 0 failed, lag 0.689 ms, 1 retried, 1 retries
+progress: 420.0 s, 19.1 tps, lat 27.604 ms stddev 189.751, 0 failed, lag 0.463 ms, 1 retried, 6 retries
+progress: 480.0 s, 19.0 tps, lat 357.526 ms stddev 1603.418, 0 failed, lag 304.737 ms, 4 retried, 19 retries
+progress: 540.0 s, 21.0 tps, lat 19.409 ms stddev 31.180, 0 failed, lag 0.128 ms, 0 retried, 0 retries
+progress: 600.0 s, 20.2 tps, lat 21.633 ms stddev 105.753, 0 failed, lag 0.093 ms, 1 retried, 1 retries
+progress: 660.0 s, 20.7 tps, lat 19.835 ms stddev 44.307, 0 failed, lag 0.242 ms, 0 retried, 0 retries
+progress: 720.0 s, 19.8 tps, lat 23.619 ms stddev 82.865, 0 failed, lag 0.541 ms, 0 retried, 0 retries
+progress: 780.0 s, 19.2 tps, lat 43.329 ms stddev 388.894, 0 failed, lag 0.415 ms, 6 retried, 19 retries
+progress: 840.0 s, 19.9 tps, lat 673.741 ms stddev 2169.782, 0 failed, lag 598.152 ms, 7 retried, 14 retries
+progress: 900.0 s, 19.1 tps, lat 18.573 ms stddev 40.061, 0 failed, lag 0.103 ms, 1 retried, 1 retries
+progress: 960.0 s, 20.2 tps, lat 25.776 ms stddev 118.991, 0 failed, lag 0.487 ms, 0 retried, 0 retries
+progress: 1020.0 s, 18.6 tps, lat 36.879 ms stddev 346.353, 0 failed, lag 0.179 ms, 3 retried, 9 retries
+progress: 1080.0 s, 19.4 tps, lat 20.994 ms stddev 43.840, 0 failed, lag 0.257 ms, 0 retried, 0 retries
+progress: 1140.0 s, 20.8 tps, lat 23.050 ms stddev 65.016, 0 failed, lag 0.181 ms, 1 retried, 2 retries
+progress: 1200.0 s, 19.2 tps, lat 17.826 ms stddev 26.799, 0 failed, lag 0.197 ms, 0 retried, 0 retries
+progress: 1260.0 s, 20.0 tps, lat 21.962 ms stddev 47.396, 0 failed, lag 0.351 ms, 0 retried, 0 retries
+progress: 1320.0 s, 19.6 tps, lat 31.794 ms stddev 226.169, 0 failed, lag 1.083 ms, 2 retried, 8 retries
+progress: 1380.0 s, 20.3 tps, lat 23.100 ms stddev 60.680, 0 failed, lag 1.242 ms, 1 retried, 1 retries
+progress: 1440.0 s, 20.5 tps, lat 19.434 ms stddev 40.324, 0 failed, lag 0.161 ms, 1 retried, 1 retries
+progress: 1500.0 s, 19.6 tps, lat 23.284 ms stddev 93.921, 0 failed, lag 0.180 ms, 1 retried, 3 retries
+progress: 1560.0 s, 20.5 tps, lat 27.062 ms stddev 101.681, 0 failed, lag 0.518 ms, 2 retried, 4 retries
+progress: 1620.0 s, 20.4 tps, lat 23.025 ms stddev 53.316, 0 failed, lag 0.265 ms, 1 retried, 1 retries
+progress: 1680.0 s, 21.5 tps, lat 21.398 ms stddev 34.007, 0 failed, lag 0.140 ms, 0 retried, 0 retries
+progress: 1740.0 s, 20.9 tps, lat 31.101 ms stddev 226.398, 0 failed, lag 0.245 ms, 3 retried, 6 retries
+progress: 1800.0 s, 20.5 tps, lat 19.058 ms stddev 28.884, 0 failed, lag 0.163 ms, 0 retried, 0 retries
+progress: 1860.0 s, 20.1 tps, lat 55.919 ms stddev 372.559, 0 failed, lag 17.244 ms, 3 retried, 13 retries
+progress: 1920.0 s, 19.7 tps, lat 24.913 ms stddev 105.393, 0 failed, lag 0.212 ms, 3 retried, 5 retries
+progress: 1980.0 s, 19.1 tps, lat 20.453 ms stddev 53.998, 0 failed, lag 0.755 ms, 1 retried, 1 retries
+progress: 2040.0 s, 19.7 tps, lat 26.702 ms stddev 184.974, 0 failed, lag 0.367 ms, 1 retried, 4 retries
+progress: 2100.0 s, 20.8 tps, lat 16.584 ms stddev 26.288, 0 failed, lag 0.075 ms, 0 retried, 0 retries
+progress: 2160.0 s, 20.3 tps, lat 42.630 ms stddev 175.013, 0 failed, lag 15.399 ms, 3 retried, 4 retries
+progress: 2220.0 s, 20.0 tps, lat 25.815 ms stddev 137.802, 0 failed, lag 0.220 ms, 0 retried, 0 retries
+progress: 2280.0 s, 20.4 tps, lat 18.682 ms stddev 29.029, 0 failed, lag 0.191 ms, 0 retried, 0 retries
+progress: 2340.0 s, 19.7 tps, lat 34.859 ms stddev 217.374, 0 failed, lag 2.516 ms, 2 retried, 5 retries
+progress: 2400.0 s, 19.8 tps, lat 19.524 ms stddev 39.193, 0 failed, lag 0.147 ms, 0 retried, 0 retries
+progress: 2460.0 s, 19.8 tps, lat 60.951 ms stddev 336.160, 0 failed, lag 28.480 ms, 2 retried, 5 retries
+progress: 2520.0 s, 20.0 tps, lat 25.505 ms stddev 94.535, 0 failed, lag 0.462 ms, 2 retried, 2 retries
+progress: 2580.0 s, 20.5 tps, lat 82.366 ms stddev 503.941, 0 failed, lag 33.163 ms, 2 retried, 12 retries
+progress: 2640.0 s, 20.0 tps, lat 26.685 ms stddev 109.244, 0 failed, lag 0.305 ms, 2 retried, 4 retries
+progress: 2700.0 s, 20.0 tps, lat 21.152 ms stddev 32.488, 0 failed, lag 0.245 ms, 0 retried, 0 retries
+progress: 2760.0 s, 20.1 tps, lat 23.770 ms stddev 46.535, 0 failed, lag 0.362 ms, 1 retried, 1 retries
+progress: 2820.0 s, 19.4 tps, lat 26.620 ms stddev 116.997, 0 failed, lag 0.128 ms, 2 retried, 3 retries
+progress: 2880.0 s, 19.7 tps, lat 18.201 ms stddev 27.895, 0 failed, lag 0.159 ms, 0 retried, 0 retries
+progress: 2940.0 s, 20.0 tps, lat 46.875 ms stddev 367.707, 0 failed, lag 4.596 ms, 5 retried, 12 retries
+progress: 3000.0 s, 20.9 tps, lat 28.165 ms stddev 197.323, 0 failed, lag 0.379 ms, 2 retried, 3 retries
+progress: 3060.0 s, 20.7 tps, lat 25.763 ms stddev 80.439, 0 failed, lag 0.933 ms, 1 retried, 2 retries
+progress: 3120.0 s, 20.1 tps, lat 19.700 ms stddev 30.760, 0 failed, lag 0.091 ms, 0 retried, 0 retries
+progress: 3180.0 s, 19.3 tps, lat 22.283 ms stddev 88.597, 0 failed, lag 0.279 ms, 1 retried, 1 retries
+progress: 3240.0 s, 20.8 tps, lat 19.623 ms stddev 31.121, 0 failed, lag 0.123 ms, 0 retried, 0 retries
+progress: 3300.0 s, 19.8 tps, lat 195.888 ms stddev 1163.289, 0 failed, lag 121.829 ms, 5 retried, 17 retries
+progress: 3360.0 s, 20.0 tps, lat 34.630 ms stddev 233.100, 0 failed, lag 0.768 ms, 4 retried, 10 retries
+progress: 3420.0 s, 21.2 tps, lat 221.477 ms stddev 1037.582, 0 failed, lag 161.962 ms, 7 retried, 19 retries
+progress: 3480.0 s, 20.6 tps, lat 26.375 ms stddev 133.167, 0 failed, lag 0.836 ms, 2 retried, 2 retries
+progress: 3540.0 s, 20.6 tps, lat 23.565 ms stddev 37.871, 0 failed, lag 0.244 ms, 0 retried, 0 retries
+progress: 3600.0 s, 19.6 tps, lat 680.125 ms stddev 2115.559, 0 failed, lag 596.212 ms, 8 retried, 18 retries
+progress: 3660.0 s, 21.0 tps, lat 455.128 ms stddev 1941.371, 0 failed, lag 407.760 ms, 5 retried, 11 retries
+progress: 3720.0 s, 19.2 tps, lat 54.457 ms stddev 404.638, 0 failed, lag 13.074 ms, 4 retried, 8 retries
+progress: 3780.0 s, 18.4 tps, lat 23.312 ms stddev 85.383, 0 failed, lag 0.345 ms, 0 retried, 0 retries
+progress: 3840.0 s, 20.0 tps, lat 28.891 ms stddev 145.058, 0 failed, lag 0.310 ms, 2 retried, 5 retries
+progress: 3900.0 s, 20.4 tps, lat 27.925 ms stddev 134.923, 0 failed, lag 0.499 ms, 2 retried, 3 retries
+progress: 3960.0 s, 19.9 tps, lat 20.809 ms stddev 42.670, 0 failed, lag 0.194 ms, 1 retried, 1 retries
+progress: 4020.0 s, 19.1 tps, lat 22.200 ms stddev 50.280, 0 failed, lag 0.559 ms, 0 retried, 0 retries
+progress: 4080.0 s, 18.5 tps, lat 41.458 ms stddev 248.782, 0 failed, lag 3.885 ms, 2 retried, 8 retries
+progress: 4140.0 s, 20.5 tps, lat 20.812 ms stddev 85.825, 0 failed, lag 0.094 ms, 1 retried, 2 retries
+progress: 4200.0 s, 20.5 tps, lat 25.490 ms stddev 121.561, 0 failed, lag 0.157 ms, 1 retried, 3 retries
+progress: 4260.0 s, 21.3 tps, lat 49.255 ms stddev 332.952, 0 failed, lag 7.045 ms, 3 retried, 7 retries
+progress: 4320.0 s, 20.0 tps, lat 30.042 ms stddev 182.548, 0 failed, lag 0.434 ms, 3 retried, 6 retries
+progress: 4380.0 s, 19.7 tps, lat 42.836 ms stddev 208.923, 0 failed, lag 14.029 ms, 4 retried, 7 retries
+progress: 4440.0 s, 20.5 tps, lat 63.720 ms stddev 402.403, 0 failed, lag 25.061 ms, 6 retried, 15 retries
+progress: 4500.0 s, 20.0 tps, lat 36.639 ms stddev 234.580, 0 failed, lag 6.709 ms, 3 retried, 8 retries
+progress: 4560.0 s, 19.6 tps, lat 25.918 ms stddev 112.253, 0 failed, lag 2.882 ms, 1 retried, 3 retries
+progress: 4620.0 s, 20.1 tps, lat 24.119 ms stddev 119.732, 0 failed, lag 0.139 ms, 1 retried, 4 retries
+progress: 4680.0 s, 19.8 tps, lat 22.388 ms stddev 45.107, 0 failed, lag 0.805 ms, 0 retried, 0 retries
+progress: 4740.0 s, 19.1 tps, lat 19.744 ms stddev 41.250, 0 failed, lag 0.089 ms, 1 retried, 1 retries
+progress: 4800.0 s, 20.7 tps, lat 26.634 ms stddev 109.242, 0 failed, lag 0.567 ms, 0 retried, 0 retries
+progress: 4860.0 s, 20.7 tps, lat 17.909 ms stddev 27.608, 0 failed, lag 0.131 ms, 0 retried, 0 retries
+progress: 4920.0 s, 19.8 tps, lat 29.712 ms stddev 140.328, 0 failed, lag 0.485 ms, 1 retried, 1 retries
+progress: 4980.0 s, 20.2 tps, lat 24.137 ms stddev 79.285, 0 failed, lag 0.696 ms, 1 retried, 1 retries
+progress: 5040.0 s, 19.4 tps, lat 109.364 ms stddev 550.780, 0 failed, lag 47.351 ms, 8 retried, 20 retries
+progress: 5100.0 s, 20.0 tps, lat 28.808 ms stddev 147.052, 0 failed, lag 0.555 ms, 2 retried, 4 retries
+progress: 5160.0 s, 20.4 tps, lat 33.001 ms stddev 186.555, 0 failed, lag 0.468 ms, 3 retried, 6 retries
+progress: 5220.0 s, 20.4 tps, lat 27.870 ms stddev 92.942, 0 failed, lag 3.153 ms, 1 retried, 2 retries
+progress: 5280.0 s, 20.3 tps, lat 19.448 ms stddev 49.922, 0 failed, lag 0.080 ms, 2 retried, 2 retries
+progress: 5340.0 s, 20.1 tps, lat 22.776 ms stddev 67.064, 0 failed, lag 0.152 ms, 1 retried, 2 retries
+transaction type: multiple scripts
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 4
+maximum number of tries: 20
+duration: 5400 s
+number of transactions actually processed: 108049
+number of failed transactions: 0 (0.000%)
+number of serialization failures: 0 (0.000%)
+number of deadlock failures: 0 (0.000%)
+number of transactions retried: 162 (0.150%)
+total number of retries: 378
+latency average = 55.619 ms
+latency stddev = 490.752 ms
+rate limit schedule lag: avg 27.026 (max 13261.532) ms
+initial connection time = 6.407 ms
+tps = 20.009653 (without initial connection time)
+SQL script 1: /soak/gen/big_insert_0.sql
+ - weight: 6 (targets 6.0% of total)
+ - 6598 transactions (6.1% of total, tps = 1.221887)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 51.309 ms
+ - latency stddev = 474.866 ms
+SQL script 2: /soak/gen/big_insert_1.sql
+ - weight: 6 (targets 6.0% of total)
+ - 6623 transactions (6.1% of total, tps = 1.226517)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 49.661 ms
+ - latency stddev = 408.319 ms
+SQL script 3: /soak/gen/big_insert_2.sql
+ - weight: 6 (targets 6.0% of total)
+ - 6463 transactions (6.0% of total, tps = 1.196887)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 48.049 ms
+ - latency stddev = 439.188 ms
+SQL script 4: /soak/gen/big_insert_3.sql
+ - weight: 6 (targets 6.0% of total)
+ - 6632 transactions (6.1% of total, tps = 1.228184)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 53.576 ms
+ - latency stddev = 472.727 ms
+SQL script 5: /soak/gen/big_replace_0.sql
+ - weight: 8 (targets 8.0% of total)
+ - 8507 transactions (7.9% of total, tps = 1.575416)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 37.177 ms
+ - latency stddev = 457.407 ms
+SQL script 6: /soak/gen/big_replace_1.sql
+ - weight: 8 (targets 8.0% of total)
+ - 8680 transactions (8.0% of total, tps = 1.607454)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 35.362 ms
+ - latency stddev = 422.723 ms
+SQL script 7: /soak/gen/big_replace_2.sql
+ - weight: 8 (targets 8.0% of total)
+ - 8666 transactions (8.0% of total, tps = 1.604861)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 31.942 ms
+ - latency stddev = 416.013 ms
+SQL script 8: /soak/gen/big_delete.sql
+ - weight: 22 (targets 22.0% of total)
+ - 23539 transactions (21.8% of total, tps = 4.359200)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 130 (0.552%)
+ - total number of retries: 332
+ - latency average = 58.686 ms
+ - latency stddev = 612.247 ms
+SQL script 9: /soak/gen/big_txn.sql
+ - weight: 30 (targets 30.0% of total)
+ - 32341 transactions (29.9% of total, tps = 5.989247)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 32 (0.099%)
+ - total number of retries: 46
+ - latency average = 74.051 ms
+ - latency stddev = 466.033 ms
