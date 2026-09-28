@@ -111,6 +111,53 @@ type ClientInfo struct {
 	// span's parent only when UseParent is set.
 	Comment   sqlcomment.Comment
 	UseParent bool
+	// IdleInTx is how long the client sat idle inside a transaction (holding
+	// its server connection) before sending this query.
+	IdleInTx time.Duration
+}
+
+// ConnError is an error on a connection with no query in flight: a rejected
+// login or a FATAL ending an idle session.
+type ConnError struct {
+	Client        bool          // client↔pgbouncer (true) or pgbouncer↔postgres
+	Key           event.ConnKey //
+	Start, End    uint64        // connection start (accept/connect/first data) and error, monotonic ns
+	Code, Message string
+	Addr          netip.AddrPort    // peer address
+	Params        map[string]string // client startup parameters, if seen
+}
+
+// ExportConnError exports a connection error as a "connect" span.
+func (e *Exporter) ExportConnError(c ConnError) {
+	kind := trace.SpanKindClient
+	attrs := []attribute.KeyValue{
+		attribute.String("db.system", "postgresql"),
+		attribute.String("db.system.name", "postgresql"),
+		attribute.Bool("pgtrace.connection_error", true),
+		attribute.String("db.response.status_code", clean(c.Code, 16)),
+		attribute.Int64("pgbouncer.pid", int64(c.Key.PID)),
+		attribute.String("pgtrace.sample_reason", string(sampler.ReasonError)),
+	}
+	addrKey, portKey, fdKey := "server.address", "server.port", "pgbouncer.server_fd"
+	if c.Client {
+		kind = trace.SpanKindServer
+		addrKey, portKey, fdKey = "client.address", "client.port", "pgbouncer.client_fd"
+	}
+	attrs = append(attrs, attribute.Int64(fdKey, int64(c.Key.FD)))
+	if c.Addr.IsValid() {
+		attrs = append(attrs, attribute.String(addrKey, c.Addr.Addr().String()), attribute.Int(portKey, int(c.Addr.Port())))
+	}
+	for key, attr := range map[string]string{"database": "db.namespace", "user": "db.user", "application_name": "application_name"} {
+		if v := c.Params[key]; v != "" {
+			attrs = append(attrs, attribute.String(attr, clean(v, 256)))
+		}
+	}
+	start := c.Start
+	if start == 0 || start > c.End {
+		start = c.End
+	}
+	e.span(context.Background(), kind, pgwire.Query{Start: start, End: c.End, Operation: "connect",
+		ErrorCode: c.Code, ErrorMessage: c.Message}, attrs)
 }
 
 // ExportTrace exports a client query as a SERVER span (pgbouncer serving the
@@ -148,6 +195,9 @@ func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client 
 		if v := client.Params[key]; v != "" {
 			attrs = append(attrs, attribute.String(attr, clean(v, 256)))
 		}
+	}
+	if client.IdleInTx > 0 {
+		attrs = append(attrs, attribute.Float64("pgbouncer.idle_in_tx_ms", float64(client.IdleInTx)/1e6))
 	}
 	// Pool wait ends when pgbouncer first talks to the server it was given,
 	// which may be an internal parameter sync before the forwarded query.

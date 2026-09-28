@@ -187,6 +187,7 @@ func run(c config) error {
 	ag.Filter = capt
 	ag.Metrics = met
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
+	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
 	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,

@@ -144,3 +144,17 @@ func BenchmarkObserveTrace(b *testing.B) {
 		m.ObserveTrace(tr, Client{})
 	}
 }
+
+func TestConnectionErrorsAndIdle(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.ConnectionError("client", "28P01")
+	m.ConnectionError("server", "53300")
+	m.IdleInTransaction(5 * time.Second)
+	if testutil.ToFloat64(m.connErrors.WithLabelValues("client", "28P01")) != 1 || testutil.ToFloat64(m.connErrors.WithLabelValues("server", "53300")) != 1 {
+		t.Fatal("connection errors")
+	}
+	if count, sum := histogram(t, reg, "pgtrace_idle_in_transaction_seconds"); count != 1 || sum != 5 {
+		t.Fatalf("idle histogram %d %v", count, sum)
+	}
+}

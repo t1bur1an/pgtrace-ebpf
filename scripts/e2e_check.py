@@ -53,7 +53,7 @@ code = lambda c: f'"span_attr:db.response.status_code":"{c}"'
 check("no kernel drops", stats["kernel_drops"] == 0, f'{stats["kernel_drops"]} drops')
 check(f"agent saw >= {args.min_traces} traces", stats["traces"] >= args.min_traces, f'{stats["traces"]}')
 kept = stats["kept_error"] + stats["kept_slow"] + stats.get("kept_parent", 0) + stats["kept_ratio"]
-exported = count(f'{ROOT}') + count(f'{CHILD} "span_attr:pgtrace.correlation":none')
+exported = count(f'{ROOT} -"span_attr:pgtrace.connection_error":true') + count(f'{CHILD} "span_attr:pgtrace.correlation":none')
 check("every kept trace reached VictoriaTraces", exported == kept, f"{exported} stored / {kept} kept")
 normal = stats["traces"] - stats["kept_error"] - stats["kept_slow"] - stats.get("kept_parent", 0)
 r = stats["kept_ratio"] / normal
@@ -137,7 +137,7 @@ check("per-database pool-wait series for the tiny pool", val(r'^pgtrace_client_p
 check("per-client metrics carry database/user/client_addr labels",
       re.search(r'^pgtrace_client_queries_total\{client_addr="[0-9.]+",database="postgres",user="postgres"\}', metrics, re.M) is not None)
 nseries = len([l for l in metrics.splitlines() if l.startswith("pgtrace_")])
-check("pgtrace series under the documented ceiling (limit 200: 8,335)", nseries <= 8335, f"{nseries} series")
+check("pgtrace series under the documented ceiling (limit 200: 8,952)", nseries <= 8952, f"{nseries} series")
 
 # --- SQLCommenter trace context -----------------------------------------------
 TID, PSID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"

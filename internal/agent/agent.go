@@ -39,26 +39,33 @@ type Filter interface {
 type Sink func(correlate.Trace, export.ClientInfo)
 
 type conn struct {
-	side connmap.Side
-	p    *pgwire.Conn
-	addr netip.AddrPort
+	side  connmap.Side
+	p     *pgwire.Conn
+	addr  netip.AddrPort
+	start uint64 // accept/connect time, or first data
+
+	inTxSince uint64                   // end of the last query that left a transaction open
+	idle      map[uint64]time.Duration // client query id → idle-in-transaction gap before it
 }
 
 type Agent struct {
 	Filter  Filter           // optional
 	Metrics *metrics.Metrics // optional: event counts, truncations
 	Parser  pgwire.Options   // per-connection parser options
+	// OnConnError receives errors that arrive with no query in flight.
+	OnConnError func(export.ConnError)
 
-	cm    *connmap.Map
-	sink  Sink
-	cor   *correlate.Correlator
-	conns map[event.ConnKey]*conn
+	cm     *connmap.Map
+	sink   Sink
+	cor    *correlate.Correlator
+	conns  map[event.ConnKey]*conn
+	opened map[event.ConnKey]uint64 // accept/connect time of sockets without data yet
 
 	events, queries, nserver, nclient atomic.Uint64
 }
 
 func New(cm *connmap.Map, sink Sink) *Agent {
-	a := &Agent{cm: cm, sink: sink, conns: map[event.ConnKey]*conn{}}
+	a := &Agent{cm: cm, sink: sink, conns: map[event.ConnKey]*conn{}, opened: map[event.ConnKey]uint64{}}
 	a.cor = correlate.New(a.emit, HoldTimeout)
 	return a
 }
@@ -67,7 +74,8 @@ func (a *Agent) emit(tr correlate.Trace) {
 	info := export.ClientInfo{}
 	if tr.Client != nil {
 		if c := a.conns[tr.Client.Key]; c != nil {
-			info = export.ClientInfo{Addr: c.addr, Params: c.p.Params()}
+			info = export.ClientInfo{Addr: c.addr, Params: c.p.Params(), IdleInTx: c.idle[tr.Client.Q.ID]}
+			delete(c.idle, tr.Client.Q.ID)
 		}
 	}
 	a.sink(tr, info)
@@ -112,14 +120,20 @@ func (a *Agent) handle(ev any) {
 		a.event("connect")
 		a.drop(ev.Key)
 		a.cm.OnConnect(ev.Key, ev.Addr)
+		a.opened[ev.Key] = ev.TS
 		a.classified(ev.Key)
 	case event.Accept:
 		a.event("accept")
 		a.drop(ev.Key)
 		a.cm.OnAccept(ev.Key, ev.Addr)
+		a.opened[ev.Key] = ev.TS
 		a.classified(ev.Key)
 	case event.Close:
 		a.event("close")
+		if c := a.conns[ev.Key]; c != nil && c.inTxSince > 0 && ev.TS > c.inTxSince && a.Metrics != nil {
+			a.Metrics.IdleInTransaction(time.Duration(ev.TS - c.inTxSince)) // closed while holding a transaction
+		}
+		delete(a.opened, ev.Key)
 		a.drop(ev.Key)
 		a.cm.OnClose(ev.Key)
 		// Also undoes an Ignore issued for this fd number by data events that
@@ -169,6 +183,12 @@ func (a *Agent) data(ev event.Data) {
 			a.ignore(ev.Key)
 			return
 		}
+		c.start = ev.TS
+		if t, ok := a.opened[ev.Key]; ok {
+			c.start = t
+			delete(a.opened, ev.Key)
+		}
+		c.idle = map[uint64]time.Duration{}
 		a.conns[ev.Key] = c
 		a.count(c.side, 1)
 	}
@@ -188,16 +208,42 @@ func (a *Agent) data(ev event.Data) {
 	for _, st := range r.Started {
 		if c.side == connmap.SideServer {
 			a.cor.ServerStarted(pid, ev.Key, st)
-		} else {
-			a.cor.ClientStarted(pid, ev.Key, st)
+			continue
 		}
+		if c.inTxSince > 0 && st.TS > c.inTxSince {
+			gap := time.Duration(st.TS - c.inTxSince)
+			c.idle[st.ID] = gap
+			if a.Metrics != nil {
+				a.Metrics.IdleInTransaction(gap)
+			}
+		}
+		c.inTxSince = 0
+		a.cor.ClientStarted(pid, ev.Key, st)
 	}
 	for _, q := range r.Done {
 		a.queries.Add(1)
 		if c.side == connmap.SideServer {
 			a.cor.ServerDone(ev.Key, q)
+			continue
+		}
+		if q.TxStatus == 'T' || q.TxStatus == 'E' {
+			c.inTxSince = q.End
 		} else {
-			a.cor.ClientDone(ev.Key, q)
+			c.inTxSince = 0
+		}
+		a.cor.ClientDone(ev.Key, q)
+	}
+	for _, ce := range r.ConnErrors {
+		side := "server"
+		if c.side == connmap.SideClient {
+			side = "client"
+		}
+		if a.Metrics != nil {
+			a.Metrics.ConnectionError(side, ce.Code)
+		}
+		if a.OnConnError != nil {
+			a.OnConnError(export.ConnError{Client: c.side == connmap.SideClient, Key: ev.Key, Start: c.start, End: ce.TS,
+				Code: ce.Code, Message: ce.Message, Addr: c.addr, Params: c.p.Params()})
 		}
 	}
 }

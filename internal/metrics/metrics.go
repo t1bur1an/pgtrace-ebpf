@@ -66,6 +66,8 @@ type Metrics struct {
 	events       *prometheus.CounterVec
 	truncations  *prometheus.CounterVec
 	traceContext *prometheus.CounterVec
+	connErrors   *prometheus.CounterVec
+	idleInTx     prometheus.Histogram
 	conns        *prometheus.GaugeVec
 	processes    prometheus.Gauge
 	reg          prometheus.Registerer
@@ -120,6 +122,14 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_trace_context_total",
 			Help: "SQLCommenter trace context on client queries: linked, not_per_execution (reused prepared statement), invalid.",
 		}, []string{"result"}),
+		connErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_connection_errors_total",
+			Help: "Errors with no query in flight (rejected logins, FATAL on idle sessions), by side and SQLSTATE.",
+		}, []string{"side", "sqlstate"}),
+		idleInTx: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "pgtrace_idle_in_transaction_seconds",
+			Help: "Gaps where a client sat idle inside a transaction, holding its server connection.", Buckets: buckets,
+		}),
 		conns: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "pgtrace_connections", Help: "Tracked pgbouncer sockets, by side.",
 		}, []string{"side"}),
@@ -127,7 +137,7 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_traced_processes", Help: "pgbouncer processes being traced.",
 		}),
 	}
-	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.conns, m.processes)
+	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.conns, m.processes)
 	if len(cfg.Labels) > 0 {
 		m.registerLabelled()
 	}
@@ -180,7 +190,8 @@ func MaxSeries(cfg Config) int {
 	n := 2*ops*2 + // queries_total: side × operation × protocol
 		2*ops*h + // query_duration_seconds
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
-		h + // pool_wait_seconds
+		2*(maxSQLStates+1) + // connection_errors_total: side × sqlstate
+		h + h + // pool_wait_seconds, idle_in_transaction_seconds
 		5 + 5 + 4 + 3 + 3 + 2 + 1 + // correlation, spans, events, truncations, trace_context, connections, traced_processes
 		1 + 2 // kernel drops, bpf run time/runs
 	if len(cfg.Labels) > 0 {
@@ -316,6 +327,12 @@ func (m *Metrics) SpanDecision(reason sampler.Reason, kept bool) {
 func (m *Metrics) Event(kind string)                 { m.events.WithLabelValues(kind).Inc() }
 func (m *Metrics) Truncation(layer string)           { m.truncations.WithLabelValues(layer).Inc() }
 func (m *Metrics) TraceContext(result string)        { m.traceContext.WithLabelValues(result).Inc() }
+func (m *Metrics) IdleInTransaction(d time.Duration) { m.idleInTx.Observe(d.Seconds()) }
+
+// ConnectionError counts an error with no query in flight.
+func (m *Metrics) ConnectionError(side, code string) {
+	m.connErrors.WithLabelValues(side, m.sqlstateLabel(code)).Inc()
+}
 func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
 func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
 

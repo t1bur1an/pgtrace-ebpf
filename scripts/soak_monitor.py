@@ -126,7 +126,7 @@ def report(out):
           f"{d('corr_internal'):.0f} internal, {d('corr_none'):.0f} none")
 
     kept = sum(f(last[k]) or 0 for k in ("kept_error", "kept_slow", "kept_parent", "kept_ratio"))
-    stored = count("kind:2") + count('kind:3 "span_attr:pgtrace.correlation":none') + count('kind:3 -"span_attr:pgtrace.correlation":none parent_span_id:""')
+    stored = count('kind:2 -"span_attr:pgtrace.connection_error":true') + count('kind:3 "span_attr:pgtrace.correlation":none') + count('kind:3 -"span_attr:pgtrace.correlation":none -"span_attr:pgtrace.connection_error":true parent_span_id:""')
     check("every kept trace reached VictoriaTraces (±0.1 %)", kept and abs(stored - kept) <= 0.001 * kept, f"{stored} stored / {kept:.0f} kept")
     export_errs = [l for l in agent_log.splitlines() if re.search(r"(?i)export|otlp|invalid utf-8", l) and re.search(r"(?i)error|fail|drop", l)]
     check("no exporter errors in agent log", not export_errs, f"{len(export_errs)} lines" + (f": {export_errs[0][:120]}" if export_errs else ""))

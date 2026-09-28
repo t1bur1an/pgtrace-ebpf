@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -185,5 +186,66 @@ func TestTruncationsCounted(t *testing.T) {
 	}
 	if got["kernel"] != 1 || got["parser"] != 1 {
 		t.Fatalf("truncations %v", got)
+	}
+}
+
+func startup(kv ...string) []byte {
+	body := []byte{0, 3, 0, 0}
+	for _, s := range kv {
+		body = append(append(body, s...), 0)
+	}
+	body = append(body, 0)
+	b := binary.BigEndian.AppendUint32(nil, uint32(len(body)+4))
+	return append(b, body...)
+}
+
+func TestConnectionErrorReported(t *testing.T) {
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	a := New(cm, func(correlate.Trace, export.ClientInfo) {})
+	var got []export.ConnError
+	a.OnConnError = func(e export.ConnError) { got = append(got, e) }
+	events := make(chan any, 4)
+	events <- event.Accept{TS: 100, Key: client, Addr: peer}
+	events <- data(client, event.DirRecv, 110, startup("user", "bob", "database", "nosuchdb"))
+	events <- data(client, event.DirSend, 150, msg('E', "SFATAL\x00C08P01\x00Mno such database: nosuchdb\x00\x00"))
+	close(events)
+	a.Run(context.Background(), events)
+	if len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	e := got[0]
+	if e.Client != true || e.Start != 100 || e.End != 150 || e.Code != "08P01" || e.Addr != peer || e.Params["database"] != "nosuchdb" || e.Params["user"] != "bob" {
+		t.Fatalf("event %+v", e)
+	}
+}
+
+func TestIdleInTransaction(t *testing.T) {
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	var traces []got
+	a := New(cm, func(tr correlate.Trace, info export.ClientInfo) { traces = append(traces, got{tr, info}) })
+	inTx := append(msg('C', "BEGIN\x00"), msg('Z', "T")...)
+	idle := append(msg('C', "COMMIT\x00"), msg('Z', "I")...)
+	events := make(chan any, 16)
+	events <- event.Accept{TS: 1, Key: client, Addr: peer}
+	events <- event.Connect{TS: 1, Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+	step := func(ts uint64, sql string, reply []byte) {
+		qq := msg('Q', sql+"\x00")
+		events <- data(client, event.DirRecv, ts, qq)
+		events <- data(server, event.DirSend, ts+1, qq)
+		events <- data(server, event.DirRecv, ts+2, reply)
+		events <- data(client, event.DirSend, ts+3, reply)
+	}
+	step(1000, "begin", inTx)
+	step(5_000_001_000, "commit", idle) // client sat idle ~5 s inside the transaction
+	close(events)
+	a.Run(context.Background(), events)
+	if len(traces) != 2 {
+		t.Fatalf("%d traces", len(traces))
+	}
+	if traces[0].info.IdleInTx != 0 {
+		t.Fatalf("first query idle %v", traces[0].info.IdleInTx)
+	}
+	if d := traces[1].info.IdleInTx; d < 4999*time.Millisecond || d > 5001*time.Millisecond {
+		t.Fatalf("idle in transaction %v", d)
 	}
 }

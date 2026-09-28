@@ -145,3 +145,29 @@ func TestPerExecution(t *testing.T) {
 		t.Error("reused named statement must not be per-execution")
 	}
 }
+
+func TestConnErrors(t *testing.T) {
+	// pgbouncer rejects the client during startup.
+	c := NewClientConn()
+	st := startupParams("user", "u", "database", "nosuchdb")
+	c.Feed(event.DirRecv, 1, st, uint32(len(st)))
+	e := bError("08P01", "no such database: nosuchdb")
+	r := c.Feed(event.DirSend, 2, e, uint32(len(e)))
+	if len(r.ConnErrors) != 1 || r.ConnErrors[0].Code != "08P01" || r.ConnErrors[0].TS != 2 {
+		t.Fatalf("startup error: %+v", r)
+	}
+	// An error answering a query is a query error, not a connection error.
+	c2 := NewClientConn()
+	c2.Feed(event.DirRecv, 1, fQuery("select 1/0"), uint32(len(fQuery("select 1/0"))))
+	be := cat(bError("22012", "division by zero"), bReady())
+	r = c2.Feed(event.DirSend, 2, be, uint32(len(be)))
+	if len(r.ConnErrors) != 0 || len(r.Done) != 1 {
+		t.Fatalf("query error misread: %+v", r)
+	}
+	// A FATAL with nothing in flight after queries completed (e.g. shutdown).
+	f := bError("57P01", "terminating connection due to administrator command")
+	r = c2.Feed(event.DirSend, 3, f, uint32(len(f)))
+	if len(r.ConnErrors) != 1 || r.ConnErrors[0].Code != "57P01" {
+		t.Fatalf("idle FATAL: %+v", r)
+	}
+}

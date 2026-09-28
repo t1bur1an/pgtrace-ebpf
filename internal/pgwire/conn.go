@@ -44,9 +44,18 @@ type Start struct {
 
 // Result is what one Feed call produced.
 type Result struct {
-	Started   []Start
-	Done      []Query
-	Truncated int // messages cut at Options.MaxMessage
+	Started    []Start
+	Done       []Query
+	Truncated  int         // messages cut at Options.MaxMessage
+	ConnErrors []ConnError // errors not answering any query
+}
+
+// ConnError is an ErrorResponse with no query in flight: a rejected login
+// (unknown database, authentication, too many connections) or a FATAL that
+// ends an idle session.
+type ConnError struct {
+	TS            uint64
+	Code, Message string
 }
 
 // Options tune a Conn.
@@ -252,6 +261,11 @@ func (c *Conn) backend(ts uint64, m msg, r *Result) {
 			g.next++
 		}
 	case 'E':
+		if g == nil {
+			code, msg := errorFields(m.body)
+			r.ConnErrors = append(r.ConnErrors, ConnError{TS: ts, Code: code, Message: msg})
+			break
+		}
 		if q == nil || g.failed {
 			break
 		}

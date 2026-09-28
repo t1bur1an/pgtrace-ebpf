@@ -276,3 +276,24 @@ func TestSampledFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestExportConnErrorAndIdle(t *testing.T) {
+	e, mem := newTest(t)
+	e.ExportConnError(ConnError{Client: true, Key: event.ConnKey{PID: 1, FD: 9}, Start: uint64(monoNow - 3_000_000), End: uint64(monoNow),
+		Code: "28P01", Message: "password authentication failed", Addr: netip.MustParseAddrPort("10.0.0.9:5555"),
+		Params: map[string]string{"user": "bob", "database": "shop"}})
+	s := mem.GetSpans()[0]
+	a := attrs(s.Attributes)
+	if s.Name != "connect" || s.SpanKind != trace.SpanKindServer || s.Status.Code != codes.Error ||
+		a["db.response.status_code"].AsString() != "28P01" || a["db.user"].AsString() != "bob" ||
+		a["client.address"].AsString() != "10.0.0.9" || !a["pgtrace.connection_error"].AsBool() ||
+		s.EndTime.Sub(s.StartTime) != 3*time.Millisecond {
+		t.Fatalf("span %s %v %v attrs %v", s.Name, s.SpanKind, s.Status, a)
+	}
+	mem.Reset()
+	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: pgwire.Query{Start: 1, End: 2, Operation: "COMMIT"}}}
+	e.ExportTrace(tr, sampler.ReasonSlow, ClientInfo{IdleInTx: 5 * time.Second}, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
+	if v := attrs(mem.GetSpans()[0].Attributes)["pgbouncer.idle_in_tx_ms"].AsFloat64(); v != 5000 {
+		t.Fatalf("idle_in_tx_ms %v", v)
+	}
+}
