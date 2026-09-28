@@ -244,3 +244,35 @@ func TestOperation(t *testing.T) {
 		t.Errorf("tag fallback: %q", got)
 	}
 }
+
+func TestHugeMessagesAreNotBuffered(t *testing.T) {
+	c := NewConn()
+	big := strings.Repeat("v", 10<<20) // 10 MiB DataRow
+	longSQL := "select '" + strings.Repeat("q", 1<<20) + "'"
+	fe := fQuery(longSQL)
+	be := cat(bRowDesc(), bRow(big), bComplete("SELECT 1"), bReady())
+	maxBuf := 0
+	for i := 0; i < len(fe); i += 4096 {
+		chunk := fe[i:min(i+4096, len(fe))]
+		c.Feed(S, 1, chunk, uint32(len(chunk)))
+		maxBuf = max(maxBuf, cap(c.fe.buf))
+	}
+	var got []Query
+	for i := 0; i < len(be); i += 4096 {
+		chunk := be[i:min(i+4096, len(be))]
+		got = append(got, c.Feed(R, 2, chunk, uint32(len(chunk)))...)
+		maxBuf = max(maxBuf, cap(c.be.buf))
+	}
+	if maxBuf > 256<<10 {
+		t.Fatalf("stream buffered %d bytes", maxBuf)
+	}
+	if len(got) != 1 || got[0].Rows != 1 || !got[0].Truncated || !strings.HasPrefix(longSQL, got[0].SQL) || len(got[0].SQL) < 32<<10 {
+		t.Fatalf("got rows=%d truncated=%v sqllen=%d n=%d", got[0].Rows, got[0].Truncated, len(got[0].SQL), len(got))
+	}
+	// Still in sync afterwards.
+	feed(c, S, 3, fQuery("select 2"))
+	got = feed(c, R, 4, cat(selectResult(1), bReady()))
+	if len(got) != 1 || got[0].SQL != "select 2" {
+		t.Fatalf("after: %+v", got)
+	}
+}

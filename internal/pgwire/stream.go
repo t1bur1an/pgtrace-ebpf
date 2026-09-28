@@ -4,6 +4,9 @@ import "encoding/binary"
 
 const (
 	maxMsgLen = 1 << 30
+	// maxKeep bounds how much of one message is buffered; longer messages
+	// are passed on truncated.
+	maxKeep = 64 << 10
 
 	codeProtocol3 = 196608
 	codeSSL       = 80877103
@@ -16,6 +19,11 @@ const (
 var (
 	frontendTypes = typeSet("QPBEDSCHXpFdcf")
 	backendTypes  = typeSet("RSKZTDCEIN123nstAGHWdcVvc")
+
+	// Messages whose body the parser reads; all others are skipped by length
+	// without buffering (DataRow, CopyData, RowDescription, ...).
+	frontendBody = typeSet("QPBEC")
+	backendBody  = typeSet("CE")
 )
 
 func typeSet(s string) (t [256]bool) {
@@ -48,6 +56,13 @@ func (s *stream) valid(typ byte) bool {
 		return frontendTypes[typ]
 	}
 	return backendTypes[typ]
+}
+
+func (s *stream) needBody(typ byte) bool {
+	if s.frontend {
+		return frontendBody[typ]
+	}
+	return backendBody[typ]
 }
 
 func (s *stream) reset() {
@@ -142,13 +157,37 @@ func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
 			s.reset()
 			return msgs, true
 		}
+		need := s.needBody(typ)
 		if len(s.buf) < 1+l {
+			// Incomplete. Everything buffered belongs to this message, so a
+			// body we don't read (or have read enough of) is emitted now and
+			// its remaining bytes discarded as they arrive.
+			if !need {
+				msgs = append(msgs, msg{typ: typ})
+			} else if len(s.buf) >= maxKeep {
+				msgs = append(msgs, msg{typ: typ, body: clone(s.buf[5:maxKeep]), truncated: true})
+			} else {
+				break
+			}
+			s.discard, s.buf = 1+l-len(s.buf), nil
 			break
 		}
-		msgs = append(msgs, msg{typ: typ, body: clone(s.buf[5 : 1+l])})
+		m := msg{typ: typ}
+		if need {
+			m.body = clone(s.buf[5 : 1+l])
+		}
+		msgs = append(msgs, m)
 		s.buf = s.buf[1+l:]
 	}
 
+	if missing > 0 && s.discard > 0 {
+		if missing > s.discard {
+			s.reset()
+			return msgs, true
+		}
+		s.discard -= missing
+		missing = 0
+	}
 	if missing > 0 {
 		// The kernel dropped the last `missing` bytes of this chunk. They are
 		// only recoverable if they all belong to the message in progress.
