@@ -119,6 +119,7 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-metrics-label-ttl` | `30m` | idle label combinations are removed after this |
 | `-sqlcommenter` | `true` | read SQLCommenter comments; a `traceparent` parents the pgbouncer span |
 | `-sqlcommenter-parent-sampling` | `true` | always keep traces whose SQLCommenter parent is sampled |
+| `-attach-param-sync` | `true` | attach pgbouncer's parameter-sync `SET`/`RESET` statements (e.g. `SET application_name`) to the client query they precede, as internal children |
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.

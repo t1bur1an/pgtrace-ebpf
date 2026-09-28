@@ -52,6 +52,7 @@ type config struct {
 	labelTTL           time.Duration
 	sqlcommenter       bool
 	parentSampling     bool
+	attachParamSync    bool
 }
 
 func main() {
@@ -77,6 +78,7 @@ func main() {
 	flag.DurationVar(&c.labelTTL, "metrics-label-ttl", 30*time.Minute, "client label combinations idle this long are removed")
 	flag.BoolVar(&c.sqlcommenter, "sqlcommenter", true, "read SQLCommenter comments; a traceparent makes the application span the parent of the pgbouncer span")
 	flag.BoolVar(&c.parentSampling, "sqlcommenter-parent-sampling", true, "always keep traces whose SQLCommenter parent is sampled")
+	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
 	flag.Parse()
 	applyEnv()
 
@@ -188,10 +190,11 @@ func run(c config) error {
 	ag.Metrics = met
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
+	ag.SetAttachParamSync(c.attachParamSync)
 	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
-		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter)
+		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync)
 
 	go func() {
 		t := time.NewTicker(c.statsEvery)

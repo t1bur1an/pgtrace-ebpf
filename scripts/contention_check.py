@@ -22,7 +22,7 @@ def logsql(q):
     return [json.loads(l) for l in out.splitlines() if l.strip()]
 
 
-FIELDS = ('trace_id, span_id, duration, status_code, status_message, "span_attr:db.response.status_code", '
+FIELDS = ('trace_id, span_id, duration, start_time_unix_nano, end_time_unix_nano, status_code, status_message, "span_attr:db.response.status_code", '
           '"span_attr:pgbouncer.pool_wait_ms", "span_attr:pgbouncer.idle_in_tx_ms", "span_attr:sqlcommenter.scenario"')
 
 
@@ -81,8 +81,12 @@ pw = roots("poolwait")
 kids = children([r["trace_id"] for r in pw])
 waits = sorted(f(r, "span_attr:pgbouncer.pool_wait_ms") for r in pw)
 p95 = waits[int(len(waits) * 0.95) - 1] if waits else 0
-consistent = sum(1 for r in pw for c in kids.get(r["trace_id"], [])[:1]
-                 if abs(ms(r) - (f(r, "span_attr:pgbouncer.pool_wait_ms") + ms(c))) < 50)
+def server_ms(cs):  # first child start → last child end (param-sync SETs included)
+    return (max(int(c["end_time_unix_nano"]) for c in cs) - min(int(c["start_time_unix_nano"]) for c in cs)) / 1e6 if cs else 0
+
+
+consistent = sum(1 for r in pw if kids.get(r["trace_id"])
+                 and abs(ms(r) - (f(r, "span_attr:pgbouncer.pool_wait_ms") + server_ms(kids[r["trace_id"]]))) < 50)
 check("6 pool exhaustion: 16 traces, pool wait p95 ≥ 1 s", len(pw) == 16 and p95 >= 1000, f"{len(pw)} traces, p95 {p95:.0f} ms, max {max(waits or [0]):.0f} ms")
 check("6 pool exhaustion: client time = pool wait + server time (±50 ms)", consistent == len(pw), f"{consistent}/{len(pw)}")
 

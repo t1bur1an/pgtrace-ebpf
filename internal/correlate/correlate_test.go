@@ -379,3 +379,86 @@ func TestPoolWaitIdenticalQueriesServedOldestFirst(t *testing.T) {
 		t.Fatalf("stats %v", st)
 	}
 }
+
+func setQ(s pgwire.Start, end uint64) pgwire.Query {
+	q := done(s, end, 'I')
+	q.SQL, q.Operation = "SET application_name='app7';", "SET"
+	return q
+}
+
+func TestParamSyncAttachedToNextClientQuery(t *testing.T) {
+	r := newRec()
+	c := st(C1, 10, 42)
+	r.recv(C1, 10)
+	r.c.ClientStarted(pid, C1, c)
+	// pgbouncer syncs application_name first and waits for the reply ...
+	set := st(S1, 11, 999)
+	r.serverStart(S1, set)
+	r.reply()
+	r.c.ServerDone(S1, setQ(set, 12))
+	if len(r.traces) != 0 {
+		t.Fatalf("SET emitted before the forwarded query: %+v", r.traces)
+	}
+	// ... then forwards the client's query.
+	q := st(S1, 13, 42)
+	r.serverStart(S1, q)
+	r.reply()
+	r.c.ServerDone(S1, done(q, 20, 'I'))
+	r.c.Event(pid)
+	r.c.ClientDone(C1, done(c, 21, 'I'))
+	tr := r.last(t)
+	if tr.Client == nil || len(tr.Server) != 2 || !tr.Server[0].Internal || tr.Server[0].Q.Operation != "SET" || tr.Server[1].Internal {
+		t.Fatalf("got %+v", tr)
+	}
+	if st := r.c.Stats(); st["internal"] != 1 || st[None] != 0 {
+		t.Fatalf("stats %v", st)
+	}
+}
+
+func TestHeldParamSyncFlushedWhenNotFollowedByClientQuery(t *testing.T) {
+	r := newRec()
+	set := st(S1, 1, 999)
+	r.serverStart(S1, set)
+	r.reply()
+	r.c.ServerDone(S1, setQ(set, 2))
+	check := st(S1, 3, 555) // server_check_query: unattributed
+	r.serverStart(S1, check)
+	if len(r.traces) != 1 || r.traces[0].Client != nil || r.traces[0].Server[0].Correlation != None || r.traces[0].Server[0].Q.Operation != "SET" {
+		t.Fatalf("held SET not flushed as none: %+v", r.traces)
+	}
+	// A held SET on a server that closes is flushed too.
+	set2 := st(S2, 5, 999)
+	r.serverStart(S2, set2)
+	r.reply()
+	r.c.ServerDone(S2, setQ(set2, 6))
+	r.c.ServerClosed(S2)
+	if len(r.traces) != 2 {
+		t.Fatalf("held SET lost on close: %+v", r.traces)
+	}
+	// And after the hold timeout.
+	set3 := st(S1, 7, 999)
+	r.c.ServerDone(S1, done(check, 7, 'I'))
+	r.serverStart(S1, set3)
+	r.reply()
+	r.c.ServerDone(S1, setQ(set3, 8))
+	n := len(r.traces)
+	r.c.Tick(8 + uint64(6*time.Second))
+	if len(r.traces) != n+1 {
+		t.Fatalf("held SET not flushed by Tick")
+	}
+	if r.c.Size() != 0 {
+		t.Fatalf("state left: %d", r.c.Size())
+	}
+}
+
+func TestParamSyncAttachDisabled(t *testing.T) {
+	r := newRec()
+	r.c.AttachParamSync = false
+	set := st(S1, 1, 999)
+	r.serverStart(S1, set)
+	r.reply()
+	r.c.ServerDone(S1, setQ(set, 2))
+	if len(r.traces) != 1 || r.traces[0].Server[0].Correlation != None {
+		t.Fatalf("disabled: %+v", r.traces)
+	}
+}

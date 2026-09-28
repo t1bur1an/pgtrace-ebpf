@@ -281,5 +281,9 @@ func (a *Agent) Stats() Stats {
 	return Stats{Events: a.events.Load(), Queries: a.queries.Load(), Server: a.nserver.Load(), Client: a.nclient.Load()}
 }
 
+// SetAttachParamSync toggles attaching pgbouncer's parameter-sync statements
+// to the client query they were issued for. Call before Run.
+func (a *Agent) SetAttachParamSync(on bool) { a.cor.AttachParamSync = on }
+
 // CorrelationStats returns the correlator's counters.
 func (a *Agent) CorrelationStats() map[string]uint64 { return a.cor.Stats() }

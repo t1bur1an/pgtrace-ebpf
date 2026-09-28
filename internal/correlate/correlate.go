@@ -82,8 +82,16 @@ type server struct {
 	link         event.ConnKey
 	linkQID      uint64 // client query most recently forwarded on this link
 	attr         map[uint64]attribution
-	unattributed []uint64 // server query ids started with no client match
+	unattributed []uint64      // server query ids started with no client match
+	held         []ServerQuery // completed parameter-sync statements awaiting the next query
+	heldSince    uint64
 }
+
+// paramSyncHold bounds how long completed SET/RESET statements wait for the
+// client query they were issued for.
+const paramSyncHold = uint64(5 * time.Second)
+
+func isParamSync(q pgwire.Query) bool { return q.Operation == "SET" || q.Operation == "RESET" }
 
 type lastRead struct {
 	key event.ConnKey
@@ -91,6 +99,11 @@ type lastRead struct {
 }
 
 type Correlator struct {
+	// AttachParamSync holds completed, unlinked SET/RESET statements on a
+	// server until its next query starts; if that query is linked to a client
+	// query, they become its internal children (pgbouncer's parameter sync).
+	AttachParamSync bool
+
 	sink    func(Trace)
 	hold    uint64
 	clients map[event.ConnKey]*client
@@ -107,14 +120,15 @@ var statNames = []string{Exact, Inferred, None, "internal", "orphan"}
 
 func New(sink func(Trace), holdTimeout time.Duration) *Correlator {
 	return &Correlator{
-		sink:    sink,
-		hold:    uint64(holdTimeout),
-		clients: map[event.ConnKey]*client{},
-		servers: map[event.ConnKey]*server{},
-		waiting: map[event.ConnKey]bool{},
-		lastRd:  map[uint32]lastRead{},
-		seq:     map[uint32]uint64{},
-		stats:   newStats(),
+		AttachParamSync: true,
+		sink:            sink,
+		hold:            uint64(holdTimeout),
+		clients:         map[event.ConnKey]*client{},
+		servers:         map[event.ConnKey]*server{},
+		waiting:         map[event.ConnKey]bool{},
+		lastRd:          map[uint32]lastRead{},
+		seq:             map[uint32]uint64{},
+		stats:           newStats(),
 	}
 }
 
@@ -165,16 +179,51 @@ func (c *Correlator) pop(k event.ConnKey, cl *client, n int) {
 }
 
 // ServerStarted attributes a query pgbouncer sent on server connection k.
+// Parameter-sync statements held on k are adopted by the client query this
+// one belongs to, or reported as unlinked if it belongs to none.
 func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start) {
 	s := c.server(k)
+	sync := s.held
+	s.held, s.heldSince = nil, 0
+	a, ok := c.attribute(pid, k, s, st)
+	if len(sync) == 0 {
+		return
+	}
+	cl := c.clients[a.client]
+	if !ok || cl == nil {
+		c.flushNone(sync)
+		return
+	}
+	h := cl.held[a.qid]
+	if h == nil {
+		h = &held{since: sync[0].Q.End}
+		cl.held[a.qid] = h
+	}
+	for _, sq := range sync {
+		sq.Correlation, sq.Internal = Exact, true
+		h.children = append(h.children, sq)
+		c.stats["internal"].Add(1)
+	}
+}
+
+func (c *Correlator) flushNone(qs []ServerQuery) {
+	for _, sq := range qs {
+		c.stats[None].Add(1)
+		c.sink(Trace{Server: []ServerQuery{sq}})
+	}
+}
+
+// attribute decides which client query server query st belongs to.
+func (c *Correlator) attribute(pid uint32, k event.ConnKey, s *server, st pgwire.Start) (attribution, bool) {
 	if s.linked {
 		if cl := c.clients[s.link]; cl != nil {
 			if i := slices.IndexFunc(cl.queue, func(p pending) bool { return p.matches(st) }); i >= 0 {
 				s.linkQID = cl.queue[i].id
-				s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact}
+				a := attribution{client: s.link, qid: s.linkQID, correlation: Exact}
+				s.attr[st.ID] = a
 				c.stats[Exact].Add(1)
 				c.pop(s.link, cl, i+1)
-				return
+				return a, true
 			}
 		}
 	}
@@ -189,12 +238,13 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 		if s.linked {
 			// Not the linked client's query and nobody else's: pgbouncer's
 			// own query inside the linked client's transaction.
-			s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact, internal: true}
+			a := attribution{client: s.link, qid: s.linkQID, correlation: Exact, internal: true}
+			s.attr[st.ID] = a
 			c.stats["internal"].Add(1)
-			return
+			return a, true
 		}
 		s.unattributed = append(s.unattributed, st.ID)
-		return
+		return attribution{}, false
 	}
 	if s.linked {
 		// Another client's query arrived: the idle ReadyForQuery that should
@@ -220,7 +270,8 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 	cl := c.clients[pick]
 	s.linked, s.link, s.linkQID = true, pick, cl.queue[0].id
 	cl.servers[k] = true
-	s.attr[st.ID] = attribution{client: pick, qid: s.linkQID, correlation: corr}
+	a := attribution{client: pick, qid: s.linkQID, correlation: corr}
+	s.attr[st.ID] = a
 	c.stats[corr].Add(1)
 	c.pop(pick, cl, 1)
 	// Queries pgbouncer sent on this server just before forwarding (e.g.
@@ -230,6 +281,7 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 		c.stats["internal"].Add(1)
 	}
 	s.unattributed = nil
+	return a, true
 }
 
 // ServerDone takes a completed server query.
@@ -250,8 +302,15 @@ func (c *Correlator) ServerDone(k event.ConnKey, q pgwire.Query) {
 	}
 	if !ok {
 		s.unattributed = slices.DeleteFunc(s.unattributed, func(id uint64) bool { return id == q.ID })
-		c.stats[None].Add(1)
-		c.sink(Trace{Server: []ServerQuery{{Key: k, Q: q, Correlation: None}}})
+		sq := ServerQuery{Key: k, Q: q, Correlation: None}
+		if c.AttachParamSync && isParamSync(q) {
+			if len(s.held) == 0 {
+				s.heldSince = q.End
+			}
+			s.held = append(s.held, sq)
+			return
+		}
+		c.flushNone([]ServerQuery{sq})
 		return
 	}
 	sq := ServerQuery{Key: k, Q: q, Correlation: a.correlation, Internal: a.internal}
@@ -339,8 +398,11 @@ func (c *Correlator) ClientClosed(k event.ConnKey) {
 
 // ServerClosed forgets a server connection; its in-flight queries never complete.
 func (c *Correlator) ServerClosed(k event.ConnKey) {
-	if s := c.servers[k]; s != nil && s.linked {
-		c.unlink(k, s)
+	if s := c.servers[k]; s != nil {
+		c.flushNone(s.held)
+		if s.linked {
+			c.unlink(k, s)
+		}
 	}
 	delete(c.servers, k)
 }
@@ -348,6 +410,12 @@ func (c *Correlator) ServerClosed(k event.ConnKey) {
 // Tick flushes server queries held longer than the hold timeout, for client
 // queries whose completion was never seen.
 func (c *Correlator) Tick(now uint64) {
+	for _, s := range c.servers {
+		if len(s.held) > 0 && now > s.heldSince && now-s.heldSince > paramSyncHold {
+			c.flushNone(s.held)
+			s.held, s.heldSince = nil, 0
+		}
+	}
 	for _, cl := range c.clients {
 		for id, h := range cl.held {
 			if now > h.since && now-h.since > c.hold {
@@ -378,7 +446,7 @@ func (c *Correlator) Size() int {
 		}
 	}
 	for _, s := range c.servers {
-		n += len(s.attr) + len(s.unattributed)
+		n += len(s.attr) + len(s.unattributed) + len(s.held)
 	}
 	return n
 }
