@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"unicode/utf8"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -189,5 +190,23 @@ func TestExportUncorrelated(t *testing.T) {
 	}
 	if attrs(spans[0].Attributes)["pgtrace.correlation"].AsString() != "none" {
 		t.Fatal("missing correlation attr")
+	}
+}
+
+func TestTruncatedTextIsValidUTF8(t *testing.T) {
+	e, mem := newTest(t)
+	// A multi-byte rune straddles the 2048-byte cut, and the captured SQL
+	// itself ends mid-rune (as when the parser truncates a long message).
+	sql := strings.Repeat("a", maxQueryText-1) + "ж" + "tail"
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: sql}})
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select '" + string([]byte("жж")[:3])}})
+	for _, s := range mem.GetSpans() {
+		v := attrs(s.Attributes)["db.query.text"].AsString()
+		if !utf8.ValidString(v) {
+			t.Fatalf("invalid UTF-8 in db.query.text: %q", v[len(v)-4:])
+		}
+		if len(v) > maxQueryText {
+			t.Fatalf("text longer than cap: %d", len(v))
+		}
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -120,7 +122,7 @@ func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client 
 	}
 	for key, attr := range map[string]string{"database": "db.namespace", "user": "db.user", "application_name": "application_name"} {
 		if v := client.Params[key]; v != "" {
-			attrs = append(attrs, attribute.String(attr, v))
+			attrs = append(attrs, attribute.String(attr, clean(v, 256)))
 		}
 	}
 	// Pool wait ends when pgbouncer first talks to the server it was given,
@@ -135,12 +137,23 @@ func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client 
 	end()
 }
 
+// clean makes wire text safe for OTLP: at most max bytes, cut on a rune
+// boundary, and valid UTF-8. Protobuf rejects invalid UTF-8 in string fields,
+// which would fail the whole export batch; captured text can be cut mid-rune.
+func clean(s string, max int) string {
+	if len(s) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
 // queryAttrs are the attributes shared by client and server query spans.
 func queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
-	text := q.SQL
-	if len(text) > maxQueryText {
-		text = text[:maxQueryText]
-	}
+	text := clean(q.SQL, maxQueryText)
 	attrs := []attribute.KeyValue{
 		attribute.String("db.system", "postgresql"),
 		attribute.String("db.system.name", "postgresql"),
@@ -148,12 +161,12 @@ func queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
 		attribute.String("db.operation.name", q.Operation),
 		attribute.Int64("db.response.returned_rows", q.Rows),
 		attribute.String("pgtrace.protocol", q.Protocol),
-		attribute.String("pgtrace.command_tag", q.CommandTag),
+		attribute.String("pgtrace.command_tag", clean(q.CommandTag, 256)),
 		attribute.Bool("pgtrace.truncated", q.Truncated),
 		attribute.String("pgtrace.sample_reason", string(reason)),
 	}
 	if q.ErrorCode != "" {
-		attrs = append(attrs, attribute.String("db.response.status_code", q.ErrorCode))
+		attrs = append(attrs, attribute.String("db.response.status_code", clean(q.ErrorCode, 16)))
 	}
 	return attrs
 }
@@ -181,7 +194,7 @@ func (e *Exporter) start(ctx context.Context, kind trace.SpanKind, q pgwire.Quer
 		trace.WithTimestamp(e.wall(q.Start)),
 		trace.WithAttributes(attrs...))
 	if q.ErrorCode != "" {
-		span.SetStatus(codes.Error, q.ErrorMessage)
+		span.SetStatus(codes.Error, clean(q.ErrorMessage, maxQueryText))
 	}
 	return ctx, func() { span.End(trace.WithTimestamp(e.wall(q.End))) }
 }
