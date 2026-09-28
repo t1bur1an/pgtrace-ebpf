@@ -136,3 +136,15 @@ CO-RE, compiled via `cilium/ebpf` `bpf2go` against `vmlinux.h` generated from
   4. Assert: spans exist; every deliberate error and slow query is present with
      correct status; SELECT/UPDATE/INSERT operations appear; kept count for
      normal queries is within a tolerance of `ratio × total`.
+
+## Revisions
+
+- 2026-09-28 (during Task 9, performance): capture moved from syscall
+  tracepoints to fexit on `__sys_sendto`/`__sys_recvfrom`/`__sys_connect` and
+  fentry on `__x64_sys_close`. Enabling any syscall tracepoint sends every
+  syscall on the host through the slow path; measured TPS overhead dropped
+  from 35% to 12.5% on a select-only pgbench. `read`/`write` capture was
+  dropped (pgbouncer uses send/recv). The agent marks non-server fds in a BPF
+  map so their payloads are not copied, and the ringbuf wakes the reader only
+  when 1 MiB is pending (reader polls every 20 ms). Results:
+  `docs/performance.md`.

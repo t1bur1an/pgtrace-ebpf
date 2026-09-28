@@ -1,0 +1,8 @@
+date: 2026-09-28T19:21:51+03:00
+cpu: AMD Ryzen 7 7700X 8-Core Processor (16 threads)
+memory: 61 GiB
+kernel: 7.2.7-arch1-1
+docker: 29.8.1
+pgbouncer: PgBouncer 1.25.2
+postgres: postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2)
+duration_per_run_s: 20

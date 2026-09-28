@@ -6,7 +6,8 @@ them, and exports them as OpenTelemetry spans (OTLP/HTTP) — tested against
 
 ```
 pgbench ─▶ pgbouncer ══(send/recv syscalls)══▶ postgres
-                │  tracepoints: sendto/recvfrom/read/write/connect/close
+                │  fexit: __sys_sendto / __sys_recvfrom / __sys_connect, fentry: __x64_sys_close
+                │  in-kernel filter: traced pid + fds not yet marked "not postgres"
                 ▼
         BPF ringbuf ─▶ pgtrace-agent: connmap → pgwire parser → sampler → OTLP ─▶ VictoriaTraces
 ```
@@ -53,6 +54,7 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-otlp-endpoint` | `http://victoriatraces:10428/insert/opentelemetry/v1/traces` | OTLP/HTTP traces URL |
 | `-service-name` | `pgbouncer` | `service.name` resource attribute |
 | `-stats-interval` | `10s` | stats log interval |
+| `-bpf-stats` | `false` | enable kernel BPF run-time accounting and log it (~1% extra overhead) |
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.
@@ -72,4 +74,7 @@ make generate    # re-generate BPF objects after editing bpf/pgtrace.bpf.c (clan
   (`pgtrace.truncated=true`) but the parser stays in sync.
 - Prepared statements parsed before the agent started show as
   `<unknown prepared statement "name">`.
-- x86-64 only (generated BPF bindings).
+- x86-64 only (generated BPF bindings); kernel needs BTF and BPF trampolines
+  (fentry/fexit, 5.5+). Tested on 7.2.
+- Only `send`/`recv`-family syscalls are captured (what pgbouncer uses);
+  `read`/`write` on sockets is not.
