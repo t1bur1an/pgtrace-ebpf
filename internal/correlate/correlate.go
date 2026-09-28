@@ -12,6 +12,7 @@ package correlate
 
 import (
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/t1bur1an/pgtrace/internal/event"
@@ -91,8 +92,12 @@ type Correlator struct {
 	servers map[event.ConnKey]*server
 	waiting map[event.ConnKey]bool   // clients with a non-empty queue
 	lastRd  map[uint32]event.ConnKey // per pid: client most recently read from
-	stats   map[string]uint64
+	// stats is read by other goroutines (stats log, metrics); everything else
+	// is owned by the goroutine calling the methods above.
+	stats map[string]*atomic.Uint64
 }
+
+var statNames = []string{Exact, Inferred, None, "internal", "orphan"}
 
 func New(sink func(Trace), holdTimeout time.Duration) *Correlator {
 	return &Correlator{
@@ -102,8 +107,16 @@ func New(sink func(Trace), holdTimeout time.Duration) *Correlator {
 		servers: map[event.ConnKey]*server{},
 		waiting: map[event.ConnKey]bool{},
 		lastRd:  map[uint32]event.ConnKey{},
-		stats:   map[string]uint64{},
+		stats:   newStats(),
 	}
+}
+
+func newStats() map[string]*atomic.Uint64 {
+	m := make(map[string]*atomic.Uint64, len(statNames))
+	for _, n := range statNames {
+		m[n] = new(atomic.Uint64)
+	}
+	return m
 }
 
 func (c *Correlator) client(k event.ConnKey) *client {
@@ -152,7 +165,7 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 			if i := slices.IndexFunc(cl.queue, func(p pending) bool { return p.matches(st) }); i >= 0 {
 				s.linkQID = cl.queue[i].id
 				s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact}
-				c.stats[Exact]++
+				c.stats[Exact].Add(1)
 				c.pop(s.link, cl, i+1)
 				return
 			}
@@ -170,7 +183,7 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 			// Not the linked client's query and nobody else's: pgbouncer's
 			// own query inside the linked client's transaction.
 			s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact, internal: true}
-			c.stats["internal"]++
+			c.stats["internal"].Add(1)
 			return
 		}
 		s.unattributed = append(s.unattributed, st.ID)
@@ -198,13 +211,13 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 	s.linked, s.link, s.linkQID = true, pick, cl.queue[0].id
 	cl.servers[k] = true
 	s.attr[st.ID] = attribution{client: pick, qid: s.linkQID, correlation: corr}
-	c.stats[corr]++
+	c.stats[corr].Add(1)
 	c.pop(pick, cl, 1)
 	// Queries pgbouncer sent on this server just before forwarding (e.g.
 	// parameter-sync SETs) belong to this client query.
 	for _, id := range s.unattributed {
 		s.attr[id] = attribution{client: pick, qid: s.linkQID, correlation: Exact, internal: true}
-		c.stats["internal"]++
+		c.stats["internal"].Add(1)
 	}
 	s.unattributed = nil
 }
@@ -214,12 +227,20 @@ func (c *Correlator) ServerDone(k event.ConnKey, q pgwire.Query) {
 	s := c.server(k)
 	a, ok := s.attr[q.ID]
 	delete(s.attr, q.ID)
+	// Queries on one connection complete in order: anything older that is
+	// still tracked was lost (e.g. the parser resynchronised) and never will.
+	for id := range s.attr {
+		if id < q.ID {
+			delete(s.attr, id)
+		}
+	}
+	s.unattributed = slices.DeleteFunc(s.unattributed, func(id uint64) bool { return id < q.ID })
 	if q.TxStatus == 'I' && s.linked {
 		c.unlink(k, s)
 	}
 	if !ok {
 		s.unattributed = slices.DeleteFunc(s.unattributed, func(id uint64) bool { return id == q.ID })
-		c.stats[None]++
+		c.stats[None].Add(1)
 		c.sink(Trace{Server: []ServerQuery{{Key: k, Q: q, Correlation: None}}})
 		return
 	}
@@ -262,19 +283,24 @@ func (c *Correlator) ClientDone(k event.ConnKey, q pgwire.Query) {
 		})
 	}
 	// A query pgbouncer answered itself was never forwarded; don't let it
-	// block the queue.
-	if i := slices.IndexFunc(cl.queue, func(p pending) bool { return p.id == q.ID }); i >= 0 {
-		cl.queue = slices.Delete(cl.queue, i, i+1)
-		if len(cl.queue) == 0 {
-			cl.queue = nil
-			delete(c.waiting, k)
+	// block the queue. Client queries complete in order, so older entries
+	// still queued or held belong to queries whose completion was lost.
+	cl.queue = slices.DeleteFunc(cl.queue, func(p pending) bool { return p.id <= q.ID })
+	if len(cl.queue) == 0 {
+		cl.queue = nil
+		delete(c.waiting, k)
+	}
+	for id, h := range cl.held {
+		if id < q.ID {
+			c.orphan(h.children)
+			delete(cl.held, id)
 		}
 	}
 	c.sink(Trace{Client: &ClientQuery{Key: k, Q: q}, Server: children})
 }
 
 func (c *Correlator) orphan(children []ServerQuery) {
-	c.stats["orphan"]++
+	c.stats["orphan"].Add(1)
 	c.sink(Trace{Server: children})
 }
 
@@ -322,11 +348,12 @@ func (c *Correlator) Tick(now uint64) {
 	}
 }
 
-// Stats returns counters: exact, inferred, internal, none, orphan.
+// Stats returns counters: exact, inferred, internal, none, orphan. It is safe
+// to call from any goroutine.
 func (c *Correlator) Stats() map[string]uint64 {
 	out := make(map[string]uint64, len(c.stats))
 	for k, v := range c.stats {
-		out[k] = v
+		out[k] = v.Load()
 	}
 	return out
 }

@@ -291,3 +291,35 @@ func TestStaleLinkRecovers(t *testing.T) {
 		t.Fatalf("stats %v", st)
 	}
 }
+
+func TestStateCleanedAfterLostQueries(t *testing.T) {
+	r := newRec()
+	// A client query whose server side never completes (parser lost its place).
+	lost := st(C1, 1, 1)
+	r.c.ClientRecv(pid, C1, 1)
+	r.c.ClientStarted(pid, C1, lost)
+	ls := st(S1, 2, 1)
+	r.c.ServerStarted(pid, S1, ls)
+	// ... and the client never saw its reply either. Later queries complete.
+	for i := uint64(0); i < 3; i++ {
+		r.query(C1, S1, 10+i*10, 100+i, 'I')
+	}
+	if n := r.c.Size(); n != 0 {
+		t.Fatalf("%d stale entries kept after later queries completed", n)
+	}
+}
+
+func TestStatsSafeForConcurrentReaders(t *testing.T) {
+	r := newRec()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			_ = r.c.Stats()
+		}
+	}()
+	for i := uint64(0); i < 1000; i++ {
+		r.query(C1, S1, 10+i*10, 5000+i, 'I')
+	}
+	<-done
+}

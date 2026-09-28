@@ -99,6 +99,14 @@ func (m *Map) Lookup(k event.ConnKey) Info {
 	return info
 }
 
+// Peek returns a cached classification without resolving unknown fds.
+func (m *Map) Peek(k event.ConnKey) (Info, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	info, ok := m.cache[k]
+	return info, ok
+}
+
 // Count returns the number of classified fds per side.
 func (m *Map) Count() map[Side]int {
 	m.mu.Lock()

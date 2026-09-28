@@ -1,0 +1,7 @@
+rep,config,workload,mode,clients,agent,ratio,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_mem_mb,queries_per_s,kept,kernel_drops,bpf_ns_per_run,bpf_runs_per_query
+1,off,select-simple,simple,1,off,,21671.600440,0.046,24.9,,,,,,,
+1,server-only,select-simple,simple,1,on,0.1,21137.576517,0.047,26.4,10.5,58.6,21135,42345,0,104,10.07
+1,client+server,select-simple,simple,1,on,0.1,21071.992633,0.047,26.9,19.8,72.6,21070,42297,0,129,10.09
+1,off,select-simple,simple,8,off,,107095.046385,0.075,61.5,,,,,,,
+1,server-only,select-simple,simple,8,on,0.1,93354.816171,0.086,64.5,39.0,68.1,93328,186926,0,93,10.01
+1,client+server,

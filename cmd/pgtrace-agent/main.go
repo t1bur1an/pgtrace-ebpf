@@ -119,7 +119,9 @@ func run(c config) error {
 	}
 
 	cm := connmap.New(connmap.Config{ProcRoot: c.procRoot, PGPort: uint16(c.pgPort), ListenPort: uint16(c.listenPort), ClientTracing: c.clientTracing})
-	serverAddr := func(k event.ConnKey) netip.AddrPort { return cm.Lookup(k).Remote }
+	// Peek, not Lookup: an orphan's server may already be closed, and
+	// resolving its fd number again could cache a reused fd's details.
+	serverAddr := func(k event.ConnKey) netip.AddrPort { info, _ := cm.Peek(k); return info.Remote }
 	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
 	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
 		met.ObserveTrace(tr)

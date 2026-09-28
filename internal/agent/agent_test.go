@@ -115,3 +115,41 @@ func TestFilterCalls(t *testing.T) {
 		t.Fatalf("cleared %v", f.cleared)
 	}
 }
+
+// The stats logger reads counters from another goroutine while Run works.
+func TestStatsReadConcurrently(t *testing.T) {
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	a := New(cm, func(correlate.Trace, export.ClientInfo) {})
+	events := make(chan any, 64)
+	go func() {
+		events <- event.Accept{Key: client, Addr: peer}
+		events <- event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+		for i := uint64(0); i < 2000; i++ {
+			ts := i * 10
+			events <- data(client, event.DirRecv, ts, q)
+			events <- data(server, event.DirSend, ts+1, q)
+			events <- data(server, event.DirRecv, ts+2, resp)
+			events <- data(client, event.DirSend, ts+3, resp)
+		}
+		close(events)
+	}()
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = a.Stats(), a.CorrelationStats()
+			}
+		}
+	}()
+	a.Run(context.Background(), events)
+	close(stop)
+	if st := a.CorrelationStats(); st[correlate.Exact] != 2000 {
+		t.Fatalf("stats %v", st)
+	}
+	if st := a.Stats(); st.Client != 1 || st.Server != 1 {
+		t.Fatalf("conn gauges %+v", st)
+	}
+}

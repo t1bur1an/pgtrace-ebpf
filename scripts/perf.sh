@@ -4,7 +4,8 @@
 # docs/perf-results/.
 #
 #   DURATION=20 CLIENTS="1 8 32 64" ./scripts/perf.sh
-#   SKIP_MATRIX=1 ./scripts/perf.sh   # only the repeat + breakdown sections
+#   SKIP_MATRIX=1 ./scripts/perf.sh   # skip the matrix; SKIP_REPEATS, SKIP_NOSYNC,
+#                                     # SKIP_CLIENT, SKIP_BREAKDOWN skip other sections
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root/deploy"
@@ -44,8 +45,8 @@ docker compose up -d --build --wait postgres pgbouncer victoriatraces >/dev/null
 docker compose build agent >/dev/null 2>&1
 docker compose run --rm -T loadgen pgbench -i -s 10 -q >/dev/null 2>&1
 
-agent_on() { # agent_on <ratio> [comm] [bpf-stats]
-	PGTRACE_SAMPLE_RATIO=$1 PGTRACE_COMM=${2:-pgbouncer} PGTRACE_BPF_STATS=${3:-$PGTRACE_BPF_STATS} \
+agent_on() { # agent_on <ratio> [comm] [bpf-stats]; PGTRACE_CLIENT_TRACING selects client tracing
+	PGTRACE_SAMPLE_RATIO=$1 PGTRACE_COMM=${2:-pgbouncer} PGTRACE_BPF_STATS=${3:-$PGTRACE_BPF_STATS} PGTRACE_CLIENT_TRACING=${PGTRACE_CLIENT_TRACING:-true} \
 		docker compose up -d agent >/dev/null 2>&1
 	for _ in $(seq 1 30); do
 		docker compose logs agent --since 60s 2>/dev/null | grep -q "INFO attached" && return
@@ -87,7 +88,8 @@ run_case() { # run_case <workload> <clients> <agent on|off> <ratio>
 import re, sys
 kv = dict(re.findall(r'(\w+)=(\S+)', sys.argv[1]))
 d = float(sys.argv[2])
-q = int(kv["queries"]); runs = int(kv["bpf_runs"]); ns = int(kv["bpf_ns"])
+# "traces" = client queries (or lone server queries); "queries" counts both sides.
+q = int(kv.get("traces", kv["queries"])); runs = int(kv["bpf_runs"]); ns = int(kv["bpf_ns"])
 kept = int(kv["kept_error"]) + int(kv["kept_slow"]) + int(kv["kept_ratio"])
 print(f'{q/d:.0f} {kept} {kv["kernel_drops"]} {ns/runs if runs else 0:.0f} {runs/q if q else 0:.2f}')
 PY
@@ -157,6 +159,29 @@ for rep in $(seq 1 "$REPEATS"); do
 	done
 done
 docker compose run --rm -T loadgen sh -c "psql -qc 'ALTER SYSTEM RESET ALL' && psql -qc 'SELECT pg_reload_conf()'" >/dev/null
+fi
+
+if [ "${SKIP_CLIENT:-0}" != 1 ]; then
+# Cost of client-side tracing + correlation on top of server-only tracing.
+echo "== client tracing: off / server-only / client+server, $REPEATS reps"
+csv="$OUT/client-tracing.csv"
+echo "rep,config,$header" > "$csv"
+for rep in $(seq 1 "$REPEATS"); do
+	for c in 1 8 64; do
+		for cfg in off server-only client+server; do
+			printf '%s,%s,' "$rep" "$cfg" >> "$csv"
+			case $cfg in
+				off) run_case select-simple "$c" off "" ;;
+				server-only) PGTRACE_CLIENT_TRACING=false run_case select-simple "$c" on 0.1 ;;
+				client+server) PGTRACE_CLIENT_TRACING=true run_case select-simple "$c" on 0.1 ;;
+			esac
+		done
+	done
+done
+echo "== client tracing stress: every trace exported (ratio 1.0), 64 clients"
+printf '1,client+server-ratio1,' >> "$csv"
+PGTRACE_CLIENT_TRACING=true run_case select-simple 64 on 1
+agent_off
 fi
 
 if [ "${SKIP_BREAKDOWN:-0}" != 1 ]; then

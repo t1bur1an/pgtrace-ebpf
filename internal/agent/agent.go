@@ -128,7 +128,6 @@ func (a *Agent) handle(ev any) {
 		a.event("data")
 		a.data(ev)
 	}
-	a.gauges()
 }
 
 // classified tells the kernel whether to keep capturing a new socket.
@@ -153,6 +152,7 @@ func (a *Agent) drop(k event.ConnKey) {
 		a.cor.ServerClosed(k)
 	}
 	delete(a.conns, k)
+	a.count(c.side, -1)
 }
 
 func (a *Agent) data(ev event.Data) {
@@ -169,6 +169,7 @@ func (a *Agent) data(ev event.Data) {
 			return
 		}
 		a.conns[ev.Key] = c
+		a.count(c.side, 1)
 	}
 	pid := ev.Key.PID
 	if c.side == connmap.SideClient && ev.Dir == event.DirRecv {
@@ -192,17 +193,14 @@ func (a *Agent) data(ev event.Data) {
 	}
 }
 
-func (a *Agent) gauges() {
-	var s, c uint64
-	for _, cn := range a.conns {
-		if cn.side == connmap.SideServer {
-			s++
-		} else {
-			c++
-		}
+// count adjusts the per-side connection gauges.
+func (a *Agent) count(side connmap.Side, delta int64) {
+	switch side {
+	case connmap.SideServer:
+		a.nserver.Add(uint64(delta))
+	case connmap.SideClient:
+		a.nclient.Add(uint64(delta))
 	}
-	a.nserver.Store(s)
-	a.nclient.Store(c)
 }
 
 func (a *Agent) ignore(k event.ConnKey) {
