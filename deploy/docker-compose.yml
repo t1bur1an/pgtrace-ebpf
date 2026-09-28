@@ -1,0 +1,58 @@
+name: pgtrace
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    command: ["postgres", "-c", "max_connections=200"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "16432:6432"
+
+  victoriatraces:
+    image: victoriametrics/victoria-traces:latest
+    ports:
+      - "10428:10428"
+
+  agent:
+    build:
+      context: ..
+    platform: linux/amd64 # BPF objects are generated for x86 only
+    privileged: true
+    pid: host
+    depends_on:
+      - victoriatraces
+    environment:
+      PGTRACE_SAMPLE_RATIO: "${PGTRACE_SAMPLE_RATIO:-0.1}"
+      PGTRACE_SLOW_MS: "${PGTRACE_SLOW_MS:-100}"
+      PGTRACE_OTLP_ENDPOINT: http://victoriatraces:10428/insert/opentelemetry/v1/traces
+      PGTRACE_STATS_INTERVAL: "${PGTRACE_STATS_INTERVAL:-10s}"
+    volumes:
+      - /sys/kernel/tracing:/sys/kernel/tracing
+      - /sys/kernel/debug:/sys/kernel/debug
+
+  # Traffic generator, started on demand: docker compose run --rm loadgen pgbench ...
+  loadgen:
+    image: postgres:17
+    profiles: ["tools"]
+    environment:
+      PGHOST: pgbouncer
+      PGPORT: "6432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    entrypoint: []
