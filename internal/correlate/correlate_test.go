@@ -265,3 +265,29 @@ func TestHoldTimeout(t *testing.T) {
 		t.Fatalf("got %+v", r.traces)
 	}
 }
+
+func TestStaleLinkRecovers(t *testing.T) {
+	r := newRec()
+	// C1 is linked to S1 and the agent never sees S1 go idle (e.g. it attached
+	// mid-transaction or lost the ReadyForQuery).
+	c1 := st(C1, 1, 1)
+	r.c.ClientRecv(pid, C1, 1)
+	r.c.ClientStarted(pid, C1, c1)
+	s1 := st(S1, 2, 1)
+	r.c.ServerStarted(pid, S1, s1)
+	r.c.ServerDone(S1, done(s1, 3, 'T'))
+	r.c.ClientDone(C1, done(c1, 4, 'T'))
+
+	// S1 is handed to C2; its query must go to C2, not be an internal child of C1.
+	c2 := st(C2, 10, 2)
+	r.c.ClientRecv(pid, C2, 10)
+	r.c.ClientStarted(pid, C2, c2)
+	s2 := st(S1, 11, 2)
+	r.c.ServerStarted(pid, S1, s2)
+	r.c.ServerDone(S1, done(s2, 12, 'I'))
+	r.c.ClientDone(C2, done(c2, 13, 'I'))
+	expectLinked(t, r.last(t), C2, S1, "exact")
+	if st := r.c.Stats(); st["internal"] != 0 {
+		t.Fatalf("stats %v", st)
+	}
+}

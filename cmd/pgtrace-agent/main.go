@@ -1,41 +1,66 @@
-// Command pgtrace-agent traces pgbouncer→postgres queries with eBPF and
-// exports sampled spans over OTLP/HTTP.
+// Command pgtrace-agent traces queries through pgbouncer with eBPF, links
+// client queries to the server queries they cause, exports sampled traces over
+// OTLP/HTTP and serves Prometheus metrics for every query.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/t1bur1an/pgtrace/internal/agent"
 	"github.com/t1bur1an/pgtrace/internal/capture"
 	"github.com/t1bur1an/pgtrace/internal/connmap"
+	"github.com/t1bur1an/pgtrace/internal/correlate"
+	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/export"
+	"github.com/t1bur1an/pgtrace/internal/metrics"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
 
+type config struct {
+	comm, procRoot     string
+	pgPort, listenPort uint
+	clientTracing      bool
+	ratio              float64
+	slowMS             int
+	endpoint, service  string
+	statsEvery         time.Duration
+	bpfStats           bool
+	metricsAddr        string
+}
+
 func main() {
-	var (
-		comm       = flag.String("comm", "pgbouncer", "process name to trace")
-		procRoot   = flag.String("proc", "/proc", "procfs root (host pid namespace)")
-		pgPort     = flag.Uint("pg-port", 5432, "postgres server port")
-		ratio      = flag.Float64("sample-ratio", 0.1, "fraction of normal queries to keep")
-		slowMS     = flag.Int("slow-ms", 100, "always keep queries at least this slow")
-		endpoint   = flag.String("otlp-endpoint", "http://victoriatraces:10428/insert/opentelemetry/v1/traces", "OTLP/HTTP traces URL")
-		service    = flag.String("service-name", "pgbouncer", "service.name resource attribute")
-		statsEvery = flag.Duration("stats-interval", 10*time.Second, "stats log interval")
-		bpfStats   = flag.Bool("bpf-stats", false, "enable kernel BPF run-time accounting and log it")
-	)
+	var c config
+	flag.StringVar(&c.comm, "comm", "pgbouncer", "process name to trace")
+	flag.StringVar(&c.procRoot, "proc", "/proc", "procfs root (host pid namespace)")
+	flag.UintVar(&c.pgPort, "pg-port", 5432, "postgres server port")
+	flag.UintVar(&c.listenPort, "listen-port", 6432, "pgbouncer listen port (identifies client sockets)")
+	flag.BoolVar(&c.clientTracing, "client-tracing", true, "trace client connections and link them to server queries")
+	flag.Float64Var(&c.ratio, "sample-ratio", 0.1, "fraction of normal traces to keep")
+	flag.IntVar(&c.slowMS, "slow-ms", 100, "always keep traces at least this slow")
+	flag.StringVar(&c.endpoint, "otlp-endpoint", "http://victoriatraces:10428/insert/opentelemetry/v1/traces", "OTLP/HTTP traces URL")
+	flag.StringVar(&c.service, "service-name", "pgbouncer", "service.name resource attribute")
+	flag.DurationVar(&c.statsEvery, "stats-interval", 10*time.Second, "stats log interval")
+	flag.BoolVar(&c.bpfStats, "bpf-stats", false, "enable kernel BPF run-time accounting")
+	flag.StringVar(&c.metricsAddr, "metrics-addr", ":9464", "Prometheus /metrics listen address (empty disables)")
 	flag.Parse()
 	applyEnv()
 
-	if err := run(*comm, *procRoot, uint16(*pgPort), *ratio, time.Duration(*slowMS)*time.Millisecond, *endpoint, *service, *statsEvery, *bpfStats); err != nil {
+	if err := run(c); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -57,11 +82,11 @@ func applyEnv() {
 	})
 }
 
-func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration, endpoint, service string, statsEvery time.Duration, bpfStats bool) error {
+func run(c config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	exp, err := export.New(ctx, endpoint, service)
+	exp, err := export.New(ctx, c.endpoint, c.service)
 	if err != nil {
 		return err
 	}
@@ -73,29 +98,60 @@ func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration
 		}
 	}()
 
-	capt, err := capture.Start(ctx, capture.Config{Comm: comm, ProcRoot: procRoot, RescanEvery: 5 * time.Second, BPFStats: bpfStats})
+	capt, err := capture.Start(ctx, capture.Config{Comm: c.comm, ProcRoot: c.procRoot, RescanEvery: 5 * time.Second, BPFStats: c.bpfStats})
 	if err != nil {
 		return fmt.Errorf("start capture (needs CAP_BPF/CAP_PERFMON or privileged): %w", err)
 	}
 	defer capt.Close()
 
-	smp := sampler.New(ratio, slow, uint64(time.Now().UnixNano()))
-	ag := agent.New(connmap.New(connmap.Config{ProcRoot: procRoot, PGPort: pgPort}), smp, exp.Export)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	met := metrics.New(reg)
+	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
+	if c.metricsAddr != "" {
+		srv := &http.Server{Addr: c.metricsAddr, Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{})}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("metrics server", "err", err)
+			}
+		}()
+		defer srv.Close()
+	}
+
+	cm := connmap.New(connmap.Config{ProcRoot: c.procRoot, PGPort: uint16(c.pgPort), ListenPort: uint16(c.listenPort), ClientTracing: c.clientTracing})
+	serverAddr := func(k event.ConnKey) netip.AddrPort { return cm.Lookup(k).Remote }
+	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
+	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
+		met.ObserveTrace(tr)
+		keep, reason := smp.DecideTrace(tr)
+		met.SpanDecision(reason, keep)
+		if keep {
+			exp.ExportTrace(tr, reason, client, serverAddr)
+		}
+	})
 	ag.Filter = capt
-	slog.Info("attached", "comm", comm, "pids", capt.Pids(), "sample_ratio", ratio, "slow", slow, "endpoint", endpoint)
+	ag.Metrics = met
+	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
+		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr)
 
 	go func() {
-		t := time.NewTicker(statsEvery)
+		t := time.NewTicker(c.statsEvery)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				st, ss := ag.Stats(), smp.Stats()
+				st, ss, cs := ag.Stats(), smp.Stats(), ag.CorrelationStats()
+				met.SetTracedProcesses(len(capt.Pids()))
+				met.SetConnections("server", int(st.Server))
+				met.SetConnections("client", int(st.Client))
 				bpfTime, bpfRuns := capt.ProgStats()
-				slog.Info("stats", "events", st.Events, "queries", st.Queries, "server_conns", st.Conns,
+				slog.Info("stats", "events", st.Events, "queries", st.Queries,
+					"server_conns", st.Server, "client_conns", st.Client, "traces", ss["seen"],
 					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_ratio", ss["kept_ratio"],
+					"corr_exact", cs[correlate.Exact], "corr_inferred", cs[correlate.Inferred], "corr_none", cs[correlate.None],
+					"corr_internal", cs["internal"], "corr_orphan", cs["orphan"],
 					"kernel_drops", capt.Drops(), "bpf_runs", bpfRuns, "bpf_ns", bpfTime.Nanoseconds())
 			}
 		}

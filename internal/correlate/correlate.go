@@ -157,9 +157,6 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 				return
 			}
 		}
-		s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact, internal: true}
-		c.stats["internal"]++
-		return
 	}
 
 	var cands []event.ConnKey
@@ -169,8 +166,20 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 		}
 	}
 	if len(cands) == 0 {
+		if s.linked {
+			// Not the linked client's query and nobody else's: pgbouncer's
+			// own query inside the linked client's transaction.
+			s.attr[st.ID] = attribution{client: s.link, qid: s.linkQID, correlation: Exact, internal: true}
+			c.stats["internal"]++
+			return
+		}
 		s.unattributed = append(s.unattributed, st.ID)
 		return
+	}
+	if s.linked {
+		// Another client's query arrived: the idle ReadyForQuery that should
+		// have ended the link was missed (e.g. tracing started mid-transaction).
+		c.unlink(k, s)
 	}
 	pick, corr := cands[0], Exact
 	if len(cands) > 1 {

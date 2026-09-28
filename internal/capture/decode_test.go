@@ -78,7 +78,7 @@ func TestDecodeShort(t *testing.T) {
 func TestDecodeAccept(t *testing.T) {
 	raw := header(3, 0, 12, 0, 0)
 	binary.LittleEndian.PutUint16(raw[26:], 2) // AF_INET
-	raw[28], raw[29] = 0x9c, 0x40             // 40000
+	raw[28], raw[29] = 0x9c, 0x40              // 40000
 	copy(raw[32:], []byte{10, 0, 0, 9})
 	got, err := decode(raw)
 	if err != nil {
