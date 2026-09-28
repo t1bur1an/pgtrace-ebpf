@@ -15,7 +15,9 @@ const (
 	kindData    = 0
 	kindConnect = 1
 	kindClose   = 2
+	kindAccept  = 3
 
+	afUnix  = 1
 	afInet  = 2
 	afInet6 = 10
 )
@@ -42,19 +44,34 @@ func decode(raw []byte) (any, error) {
 			Payload:  append([]byte(nil), raw[headerSize:headerSize+capLen]...),
 		}, nil
 	case kindConnect:
-		port := binary.BigEndian.Uint16(raw[28:])
-		var addr netip.Addr
-		switch le.Uint16(raw[26:]) {
-		case afInet:
-			addr = netip.AddrFrom4([4]byte(raw[32:36]))
-		case afInet6:
-			addr = netip.AddrFrom16([16]byte(raw[32:48])).Unmap()
-		default:
-			return nil, fmt.Errorf("unsupported family %d", le.Uint16(raw[26:]))
+		addr, err := sockAddr(raw)
+		if err != nil {
+			return nil, err
 		}
-		return event.Connect{TS: ts, Key: key, Addr: netip.AddrPortFrom(addr, port)}, nil
+		return event.Connect{TS: ts, Key: key, Addr: addr}, nil
+	case kindAccept:
+		if le.Uint16(raw[26:]) == afUnix {
+			return event.Accept{TS: ts, Key: key}, nil
+		}
+		addr, err := sockAddr(raw)
+		if err != nil {
+			return nil, err
+		}
+		return event.Accept{TS: ts, Key: key, Addr: addr}, nil
 	case kindClose:
 		return event.Close{TS: ts, Key: key}, nil
 	}
 	return nil, fmt.Errorf("unknown event kind %d", raw[24])
+}
+
+func sockAddr(raw []byte) (netip.AddrPort, error) {
+	port := binary.BigEndian.Uint16(raw[28:])
+	switch fam := binary.LittleEndian.Uint16(raw[26:]); fam {
+	case afInet:
+		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(raw[32:36])), port), nil
+	case afInet6:
+		return netip.AddrPortFrom(netip.AddrFrom16([16]byte(raw[32:48])).Unmap(), port), nil
+	default:
+		return netip.AddrPort{}, fmt.Errorf("unsupported family %d", fam)
+	}
 }

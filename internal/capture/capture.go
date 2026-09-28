@@ -42,7 +42,8 @@ type fdKey struct {
 	FD   int32
 }
 
-// Capture delivers event.Data, event.Connect and event.Close values on Events.
+// Capture delivers event.Data, event.Connect, event.Accept and event.Close
+// values on Events.
 type Capture struct {
 	Events <-chan any
 
@@ -70,7 +71,7 @@ func Start(ctx context.Context, cfg Config) (*Capture, error) {
 		}
 		return nil, fmt.Errorf("load bpf: %w", err)
 	}
-	for _, prog := range []*ebpf.Program{c.objs.ExitSendto, c.objs.ExitRecvfrom, c.objs.ExitConnect, c.objs.EnterClose} {
+	for _, prog := range []*ebpf.Program{c.objs.ExitSendto, c.objs.ExitRecvfrom, c.objs.ExitConnect, c.objs.ExitAccept4, c.objs.EnterClose} {
 		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
 		if err != nil {
 			c.Close()

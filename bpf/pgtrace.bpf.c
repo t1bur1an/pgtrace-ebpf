@@ -10,6 +10,7 @@
 
 #define MAX_PAYLOAD 4096
 #define EINPROGRESS 115
+#define AF_UNIX 1
 #define AF_INET 2
 #define AF_INET6 10
 // Wake the consumer only once this much data is pending; otherwise it drains
@@ -18,7 +19,7 @@
 
 #define CLASS_IGNORE 2
 
-enum kind { K_DATA = 0, K_CONNECT = 1, K_CLOSE = 2 };
+enum kind { K_DATA = 0, K_CONNECT = 1, K_CLOSE = 2, K_ACCEPT = 3 };
 enum dir { D_SEND = 0, D_RECV = 1 };
 
 // Must match internal/capture/decode.go.
@@ -179,6 +180,37 @@ int BPF_PROG(exit_connect, int fd, void *uservaddr, int addrlen, int ret)
 		bpf_probe_read_user(e->addr, 4, uservaddr + 4);
 	else
 		bpf_probe_read_user(e->addr, 16, uservaddr + 8);
+	if (bpf_ringbuf_output(&events, e, offsetof(struct event, payload), rb_flags()) != 0)
+		count_drop();
+	return 0;
+}
+
+// Accepted client connections, with the peer address pgbouncer asked for.
+SEC("fexit/__sys_accept4")
+int BPF_PROG(exit_accept4, int fd, void *upeer, int *upeer_len, int flags, int ret)
+{
+	if (ret < 0)
+		return 0;
+	__u64 id = bpf_get_current_pid_tgid();
+	if (!traced(id))
+		return 0;
+	struct event *e = new_event(id, ret, K_ACCEPT);
+	if (!e)
+		return 0;
+	__u16 family = 0;
+	__builtin_memset(e->addr, 0, sizeof(e->addr));
+	__builtin_memset(e->port, 0, sizeof(e->port));
+	if (upeer) {
+		bpf_probe_read_user(&family, sizeof(family), upeer);
+		if (family == AF_INET) {
+			bpf_probe_read_user(e->port, 2, upeer + 2);
+			bpf_probe_read_user(e->addr, 4, upeer + 4);
+		} else if (family == AF_INET6) {
+			bpf_probe_read_user(e->port, 2, upeer + 2);
+			bpf_probe_read_user(e->addr, 16, upeer + 8);
+		}
+	}
+	e->family = family;
 	if (bpf_ringbuf_output(&events, e, offsetof(struct event, payload), rb_flags()) != 0)
 		count_drop();
 	return 0;

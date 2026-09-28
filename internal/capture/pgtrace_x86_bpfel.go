@@ -45,6 +45,7 @@ const (
 	pgtraceMapScratch       = "scratch"
 	pgtraceMapTargetPids    = "target_pids"
 	pgtraceProgEnterClose   = "enter_close"
+	pgtraceProgExitAccept4  = "exit_accept4"
 	pgtraceProgExitConnect  = "exit_connect"
 	pgtraceProgExitRecvfrom = "exit_recvfrom"
 	pgtraceProgExitSendto   = "exit_sendto"
@@ -93,6 +94,7 @@ type pgtraceSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type pgtraceProgramSpecs struct {
 	EnterClose   *ebpf.ProgramSpec `ebpf:"enter_close"`
+	ExitAccept4  *ebpf.ProgramSpec `ebpf:"exit_accept4"`
 	ExitConnect  *ebpf.ProgramSpec `ebpf:"exit_connect"`
 	ExitRecvfrom *ebpf.ProgramSpec `ebpf:"exit_recvfrom"`
 	ExitSendto   *ebpf.ProgramSpec `ebpf:"exit_sendto"`
@@ -163,6 +165,7 @@ type pgtraceVariables struct {
 // It can be passed to loadPgtraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pgtracePrograms struct {
 	EnterClose   *ebpf.Program `ebpf:"enter_close"`
+	ExitAccept4  *ebpf.Program `ebpf:"exit_accept4"`
 	ExitConnect  *ebpf.Program `ebpf:"exit_connect"`
 	ExitRecvfrom *ebpf.Program `ebpf:"exit_recvfrom"`
 	ExitSendto   *ebpf.Program `ebpf:"exit_sendto"`
@@ -171,6 +174,7 @@ type pgtracePrograms struct {
 func (p *pgtracePrograms) Close() error {
 	return _PgtraceClose(
 		p.EnterClose,
+		p.ExitAccept4,
 		p.ExitConnect,
 		p.ExitRecvfrom,
 		p.ExitSendto,

@@ -74,3 +74,28 @@ func TestDecodeShort(t *testing.T) {
 		t.Fatal("want error for cap_len beyond record")
 	}
 }
+
+func TestDecodeAccept(t *testing.T) {
+	raw := header(3, 0, 12, 0, 0)
+	binary.LittleEndian.PutUint16(raw[26:], 2) // AF_INET
+	raw[28], raw[29] = 0x9c, 0x40             // 40000
+	copy(raw[32:], []byte{10, 0, 0, 9})
+	got, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := event.Accept{TS: 777, Key: event.ConnKey{PID: 42, FD: 12}, Addr: netip.MustParseAddrPort("10.0.0.9:40000")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v", got)
+	}
+
+	rawUnix := header(3, 0, 13, 0, 0)
+	binary.LittleEndian.PutUint16(rawUnix[26:], 1) // AF_UNIX
+	got, err = decode(rawUnix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := got.(event.Accept); a.Addr.IsValid() || a.Key.FD != 13 {
+		t.Fatalf("unix accept %+v", a)
+	}
+}

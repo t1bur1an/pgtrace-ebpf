@@ -39,3 +39,11 @@ type Close struct {
 	TS  uint64
 	Key ConnKey
 }
+
+// Accept is a connection accepted by the traced process. Addr is the peer
+// address, invalid for unix sockets.
+type Accept struct {
+	TS   uint64
+	Key  ConnKey
+	Addr netip.AddrPort
+}
