@@ -1,26 +1,85 @@
 # pgtrace performance
 
-What it costs to trace pgbouncer → postgres traffic with pgtrace, and how much
-it can handle. Raw data is in `docs/perf-results/`; everything here can be
-reproduced with `scripts/perf.sh` and `go test -bench`.
+What it costs to trace pgbouncer traffic with pgtrace, and how much it can
+handle. Raw data is in `docs/perf-results/`; everything here can be reproduced
+with `scripts/perf.sh` and `go test -bench`.
+
+The agent has two modes. **Client + server** (`-client-tracing=true`, the
+default) traces the client side too and links each client query to its server
+query. **Server-only** (`-client-tracing=false`) traces only pgbouncer →
+postgres. [Client tracing](#client-tracing-and-correlation) compares both. The
+sections after it were measured with the server-only version and still
+describe that mode.
 
 ## TL;DR
 
 | question | answer |
 |---|---|
-| Throughput cost, CPU-bound, trivially cheap queries (worst case) | **−10 % … −13 % TPS** at 8–64 clients (≈ 90 k queries/s); −1 % … −3.5 % at 1 client |
+| Throughput cost, CPU-bound, trivially cheap queries (worst case), **client + server tracing** | **−17 % TPS** at 8–64 clients (≈ 88 k client queries/s); −3 % at 1 client |
+| Same, **server-only** tracing | **−10 % … −13 % TPS** at 8–64 clients (≈ 90 k queries/s); −1 % … −3.5 % at 1 client |
 | Latency added per query (same workload) | **+10 µs** at 8 clients (75 → 85 µs), +2 µs at 1 client |
 | Where it goes | −3.7 %: fexit trampolines on every `sendto`/`recvfrom` on the host (paid even by pgbench and postgres); −7.7 %: capturing pgbouncer's server traffic + agent; −1 %: optional BPF run-time stats |
 | In-kernel cost | ≈ 10 BPF program runs per query host-wide, **≈ 95 ns per run** (with stats accounting on) |
-| Agent CPU / memory at ≈ 90 k queries/s | **0.27–0.37 core**, **60–70 MiB** at sample ratio 0.1; **1.0–1.1 core**, 90–125 MiB exporting every query |
+| Agent CPU / memory at ≈ 90 k queries/s | client + server: **0.7 core**, **70 MiB** at sample ratio 0.1; **2.1 cores**, 310 MiB exporting every trace (2 spans each). Server-only: 0.3–0.4 core, 60–70 MiB |
 | Highest rate tested | 93 k queries/s through a single pgbouncer (pgbouncer + postgres + pgbench on one 8-core box were the limit, not the agent) |
 | Loss | **0 kernel ringbuf drops** in every run; **4 119 410 / 4 119 410** spans the agent kept arrived in VictoriaTraces |
-| Agent userspace capacity (projected from benchmarks) | ≈ 2 M queries/s/core parse-only; ≈ 400 k exported spans/s/core |
+| Agent userspace capacity (projected from benchmarks) | ≈ 650 k client queries/s/core through parse + correlate; ≈ 400 k exported spans/s/core |
 
 For real workloads where queries take milliseconds rather than tens of
 microseconds, the relative cost is proportionally smaller: the absolute cost is
 roughly **1 µs of kernel CPU and 3 µs of agent CPU per query** (see
 [Cost model](#cost-model)).
+
+## Client tracing and correlation
+
+`pgbench -S -M simple`, 20 s per run, 3 repetitions, configurations alternated
+(`client-tracing.csv`). "Server-only" is `-client-tracing=false`. Both on runs
+use sample ratio 0.1, `-bpf-stats`, and the Prometheus metrics endpoint.
+
+| clients | off TPS | server-only | client + server | agent CPU (server-only → client+server) | agent mem | BPF ns/run |
+|---:|---:|---:|---:|---|---:|---|
+| 1 | 21 976 ± 195 | 21 473 (−2.3 %) | 21 325 (**−3.0 %**) | 10 % → 20 % | 67 MiB | 104 → 127 |
+| 8 | 106 934 ± 448 | 93 267 (−12.8 %) | 88 207 (**−17.5 %**) | 38 % → 73 % | 70 MiB | 94 → 121 |
+| 64 | 89 675 ± 214 | 78 473 (−12.5 %) | 74 412 (**−17.0 %**) | 33 % → 68 % | 72 MiB | 88 → 113 |
+
+Spread between repetitions was under 0.5 %. There were 0 kernel drops.
+
+- **Client tracing adds about 4.5 TPS points** on this worst-case workload. The
+  kernel now copies payloads for pgbouncer's client-side syscalls too (4 copied
+  payloads per query instead of 2; BPF ns/run rises about 25 %). The agent parses
+  both sides and runs the correlator, which roughly doubles its CPU. The agent
+  competes for the same 8 cores as pgbench, pgbouncer and postgres here.
+- **Server-only mode uses more agent CPU than the first version** (38 % vs
+  28 % at 8 clients). The difference is the Prometheus metrics, which observe
+  every query (≈ 0.24 µs per trace, `BenchmarkObserveTrace`), plus signature
+  hashing in the parser.
+- **Exporting everything** (ratio 1.0, 64 clients, 2 spans per trace): 70 155
+  TPS (−22 % vs off), agent 2.1 cores and 311 MiB, 1.4 M traces exported in
+  20 s with 0 drops.
+- **Correlation quality** from `make e2e` (pgbench simple/extended/prepared,
+  4 clients): 4 288 exact + 1 inferred of 4 290 sampled client queries; every
+  server child's time range lay inside its root and had identical SQL. The
+  agent's counters for the whole run: 42 115 exact, 3 inferred, 8 none (pgbouncer
+  `server_check_query`), 0 internal, 0 orphan.
+
+Agent userspace cost per client query, from the Go benchmarks on the same CPU
+(`bench.txt`):
+
+| benchmark | ns/op |
+|---|---:|
+| `Pipeline`: client recv + server send + server recv + client send through connmap, both parsers and the correlator | 1 535 |
+| `ObserveTrace`: Prometheus metrics for one trace | 241 |
+| `Export`: one span into the batch processor | 2 486 |
+| `ConnSimpleQuery` / `ConnExtendedQuery`: one parser round trip | 438 / 779 |
+
+At ratio 0.1 that is ≈ 1.5 + 0.24 + 0.1 × 2 × 2.5 ≈ **2.3 µs of agent CPU per
+client query** before ringbuf/decode overhead. Measured end-to-end, it was
+0.73 core at 88 k/s ≈ 8.3 µs, including decode, channel hand-off, the Go
+runtime and GC.
+
+**Cost model with client tracing:** about 1.2 µs of kernel CPU (≈ 10 runs ×
+120 ns) and 8 µs of agent CPU per client query. For example, 10 k client
+queries/s costs about 0.012 core in the kernel and 0.08 core in the agent.
 
 ## Setup
 
@@ -229,10 +288,10 @@ select-only, 5 s smoke runs):
 ```bash
 go test -run '^$' -bench . -count 3 ./internal/pgwire ./internal/agent ./internal/export
 DURATION=20 ./scripts/perf.sh                     # full matrix + repeats + tpcb nosync + breakdown (~35 min)
-SKIP_MATRIX=1 SKIP_REPEATS=1 ./scripts/perf.sh    # only tpcb nosync + breakdown
+SKIP_MATRIX=1 SKIP_REPEATS=1 SKIP_NOSYNC=1 SKIP_BREAKDOWN=1 ./scripts/perf.sh   # only the client-tracing comparison
 ```
 
 Files written to `docs/perf-results/`: `results.csv` (matrix and stress),
-`repeats.csv`, `tpcb-nosync.csv`, `breakdown.csv`, `completeness.txt`,
+`repeats.csv`, `tpcb-nosync.csv`, `client-tracing.csv`, `breakdown.csv`, `completeness.txt`,
 `host.txt`, plus `bench.txt` and `tpcb-fsync-attribution.txt` from the commands
 above.

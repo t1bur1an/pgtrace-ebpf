@@ -113,3 +113,14 @@ func TestSpanDecisionsAndKernel(t *testing.T) {
 		t.Fatalf("kernel metrics %v", found)
 	}
 }
+
+func BenchmarkObserveTrace(b *testing.B) {
+	m := New(prometheus.NewRegistry())
+	root := q("SELECT", 1, "")
+	child := q("SELECT", 1, "")
+	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: root}, Server: []correlate.ServerQuery{{Q: child, Correlation: "exact"}}}
+	b.ReportAllocs()
+	for b.Loop() {
+		m.ObserveTrace(tr)
+	}
+}

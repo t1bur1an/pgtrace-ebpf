@@ -288,3 +288,16 @@ collectors. Metrics count **all** queries, not only sampled ones.
   clients can be swapped between clients (`inferred`). The durations stay
   right; only the client attribution may be wrong.
 - Unix-socket clients have no address.
+
+## Revisions
+
+- During implementation: rule 2's "S is linked but no entry matches → internal"
+  now first looks for another waiting client whose queue head matches. If one
+  exists, the link was stale (its idle `Z` was missed, e.g. the agent attached
+  mid-transaction) and S is relinked to that client. Seen live as 24 real
+  queries marked internal + 3 orphans before the change.
+- Completing query N on a connection clears older tracked entries on that
+  connection (queries complete in order; older ones were lost to a parser
+  resync), which bounds correlator memory.
+- Extended-protocol queries are reported at their group's `ReadyForQuery`, so
+  every query carries the transaction status used to unlink servers.

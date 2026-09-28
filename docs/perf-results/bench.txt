@@ -2,29 +2,38 @@ goos: linux
 goarch: amd64
 pkg: github.com/t1bur1an/pgtrace/internal/pgwire
 cpu: AMD Ryzen 7 7700X 8-Core Processor             
-BenchmarkConnSimpleQuery-16      	10669014	       518.1 ns/op	 233.56 MB/s	     936 B/op	      15 allocs/op
-BenchmarkConnSimpleQuery-16      	10393375	       343.5 ns/op	 352.21 MB/s	     936 B/op	      15 allocs/op
-BenchmarkConnSimpleQuery-16      	10197862	       348.5 ns/op	 347.21 MB/s	     936 B/op	      15 allocs/op
-BenchmarkConnExtendedQuery-16    	 5397008	       666.0 ns/op	 249.27 MB/s	    1896 B/op	      21 allocs/op
-BenchmarkConnExtendedQuery-16    	 5438227	       665.1 ns/op	 249.57 MB/s	    1896 B/op	      21 allocs/op
-BenchmarkConnExtendedQuery-16    	 5415258	       669.3 ns/op	 248.02 MB/s	    1896 B/op	      21 allocs/op
+BenchmarkConnSimpleQuery-16      	 8182104	       438.5 ns/op	 275.95 MB/s	    1072 B/op	      17 allocs/op
+BenchmarkConnSimpleQuery-16      	 8129734	       438.2 ns/op	 276.11 MB/s	    1072 B/op	      17 allocs/op
+BenchmarkConnSimpleQuery-16      	 8205506	       439.7 ns/op	 275.20 MB/s	    1072 B/op	      17 allocs/op
+BenchmarkConnExtendedQuery-16    	 4610296	       783.8 ns/op	 211.79 MB/s	    2040 B/op	      24 allocs/op
+BenchmarkConnExtendedQuery-16    	 4641314	       778.9 ns/op	 213.12 MB/s	    2040 B/op	      24 allocs/op
+BenchmarkConnExtendedQuery-16    	 4685086	       779.1 ns/op	 213.07 MB/s	    2040 B/op	      24 allocs/op
 PASS
-ok  	github.com/t1bur1an/pgtrace/internal/pgwire	23.491s
+ok  	github.com/t1bur1an/pgtrace/internal/pgwire	21.640s
 goos: linux
 goarch: amd64
 pkg: github.com/t1bur1an/pgtrace/internal/agent
 cpu: AMD Ryzen 7 7700X 8-Core Processor             
-BenchmarkPipeline-16    	 7533549	       475.9 ns/op	     953 B/op	      15 allocs/op
-BenchmarkPipeline-16    	 7546428	       477.8 ns/op	     953 B/op	      15 allocs/op
-BenchmarkPipeline-16    	 7570124	       476.0 ns/op	     953 B/op	      15 allocs/op
+BenchmarkPipeline-16    	 2344472	      1535 ns/op	    2624 B/op	      38 allocs/op
+BenchmarkPipeline-16    	 2351326	      1532 ns/op	    2624 B/op	      38 allocs/op
+BenchmarkPipeline-16    	 2335527	      1537 ns/op	    2624 B/op	      38 allocs/op
 PASS
-ok  	github.com/t1bur1an/pgtrace/internal/agent	10.799s
+ok  	github.com/t1bur1an/pgtrace/internal/agent	10.798s
 goos: linux
 goarch: amd64
 pkg: github.com/t1bur1an/pgtrace/internal/export
 cpu: AMD Ryzen 7 7700X 8-Core Processor             
-BenchmarkExport-16    	 1436031	      2510 ns/op	    5656 B/op	      17 allocs/op
-BenchmarkExport-16    	 1428993	      2525 ns/op	    5656 B/op	      17 allocs/op
-BenchmarkExport-16    	 1422355	      2531 ns/op	    5656 B/op	      17 allocs/op
+BenchmarkExport-16    	 1445626	      2486 ns/op	    5480 B/op	      19 allocs/op
+BenchmarkExport-16    	 1462353	      2461 ns/op	    5480 B/op	      19 allocs/op
+BenchmarkExport-16    	 1438814	      2510 ns/op	    5480 B/op	      19 allocs/op
 PASS
-ok  	github.com/t1bur1an/pgtrace/internal/export	10.819s
+ok  	github.com/t1bur1an/pgtrace/internal/export	10.811s
+goos: linux
+goarch: amd64
+pkg: github.com/t1bur1an/pgtrace/internal/metrics
+cpu: AMD Ryzen 7 7700X 8-Core Processor             
+BenchmarkObserveTrace-16    	14715192	       240.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObserveTrace-16    	14828922	       244.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkObserveTrace-16    	14802396	       241.5 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/t1bur1an/pgtrace/internal/metrics	10.743s
