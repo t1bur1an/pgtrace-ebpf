@@ -11,16 +11,22 @@ import (
 	"strings"
 )
 
-// parseProcNetTCP reads /proc/<pid>/net/tcp{,6} and maps socket inode to the
-// remote address.
-func parseProcNetTCP(r io.Reader, v6 bool) (map[uint64]netip.AddrPort, error) {
-	out := map[uint64]netip.AddrPort{}
+type sockAddrs struct{ Local, Remote netip.AddrPort }
+
+// parseProcNetTCP reads /proc/<pid>/net/tcp{,6} and maps socket inode to its
+// local and remote addresses.
+func parseProcNetTCP(r io.Reader, v6 bool) (map[uint64]sockAddrs, error) {
+	out := map[uint64]sockAddrs{}
 	sc := bufio.NewScanner(r)
 	sc.Scan() // header
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
 		if len(f) < 10 {
 			continue
+		}
+		local, err := parseHexAddr(f[1], v6)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q: %w", f[1], err)
 		}
 		remote, err := parseHexAddr(f[2], v6)
 		if err != nil {
@@ -30,7 +36,31 @@ func parseProcNetTCP(r io.Reader, v6 bool) (map[uint64]netip.AddrPort, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse inode %q: %w", f[9], err)
 		}
-		out[inode] = remote
+		out[inode] = sockAddrs{Local: local, Remote: remote}
+	}
+	return out, sc.Err()
+}
+
+// parseProcNetUnix reads /proc/<pid>/net/unix and maps socket inode to its
+// path ("" for unnamed sockets).
+func parseProcNetUnix(r io.Reader) (map[uint64]string, error) {
+	out := map[uint64]string{}
+	sc := bufio.NewScanner(r)
+	sc.Scan() // header
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 7 {
+			continue
+		}
+		inode, err := strconv.ParseUint(f[6], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse inode %q: %w", f[6], err)
+		}
+		path := ""
+		if len(f) > 7 {
+			path = f[7]
+		}
+		out[inode] = path
 	}
 	return out, sc.Err()
 }

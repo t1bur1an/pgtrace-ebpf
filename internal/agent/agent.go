@@ -61,7 +61,7 @@ func (a *Agent) handle(ev any) {
 	case event.Connect:
 		a.cm.OnConnect(ev.Key, ev.Addr)
 		delete(a.conns, ev.Key)
-		if a.cm.Lookup(ev.Key).Server {
+		if a.cm.Lookup(ev.Key).Side == connmap.SideServer {
 			a.clear(ev.Key)
 		} else {
 			a.ignore(ev.Key)
@@ -74,7 +74,7 @@ func (a *Agent) handle(ev any) {
 		a.clear(ev.Key)
 	case event.Data:
 		info := a.cm.Lookup(ev.Key)
-		if !info.Server {
+		if info.Side != connmap.SideServer {
 			a.ignore(ev.Key)
 			return
 		}

@@ -40,7 +40,7 @@ func TestRunEmitsOnlyServerQueries(t *testing.T) {
 	close(events)
 
 	var got []export.Span
-	a := New(connmap.New(t.TempDir(), 5432), sampler.New(1, time.Second, 1), func(s export.Span) { got = append(got, s) })
+	a := New(connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432}), sampler.New(1, time.Second, 1), func(s export.Span) { got = append(got, s) })
 	a.Run(context.Background(), events)
 
 	if len(got) != 1 {
@@ -64,7 +64,7 @@ func TestRunDropsUnsampled(t *testing.T) {
 	events <- data(server, event.DirRecv, 3, append(msg('C', "SELECT 1\x00"), msg('Z', "I")...))
 	close(events)
 	n := 0
-	a := New(connmap.New(t.TempDir(), 5432), sampler.New(0, time.Second, 1), func(export.Span) { n++ })
+	a := New(connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432}), sampler.New(0, time.Second, 1), func(export.Span) { n++ })
 	a.Run(context.Background(), events)
 	if n != 0 || a.Stats().Queries != 1 {
 		t.Fatalf("n=%d stats=%+v", n, a.Stats())
@@ -89,7 +89,7 @@ func TestRunTellsKernelToIgnoreNonServerFDs(t *testing.T) {
 	close(events)
 
 	f := &fakeFilter{}
-	a := New(connmap.New(t.TempDir(), 5432), sampler.New(1, time.Second, 1), func(export.Span) {})
+	a := New(connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432}), sampler.New(1, time.Second, 1), func(export.Span) {})
 	a.Filter = f
 	a.Run(context.Background(), events)
 

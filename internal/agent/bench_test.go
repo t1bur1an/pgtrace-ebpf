@@ -20,7 +20,7 @@ func BenchmarkPipeline(b *testing.B) {
 	resp := append(append(append(msg('T', "\x00\x01abalance\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00"),
 		msg('D', "\x00\x01\x00\x00\x00\x010")...), msg('C', "SELECT 1\x00")...), msg('Z', "I")...)
 
-	a := New(connmap.New(b.TempDir(), 5432), sampler.New(0.1, time.Second, 1), func(export.Span) {})
+	a := New(connmap.New(connmap.Config{ProcRoot: b.TempDir(), PGPort: 5432}), sampler.New(0.1, time.Second, 1), func(export.Span) {})
 	a.handle(event.Connect{Key: key, Addr: netip.MustParseAddrPort("10.0.0.2:5432")})
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {

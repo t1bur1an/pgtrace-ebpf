@@ -80,7 +80,7 @@ func run(comm, procRoot string, pgPort uint16, ratio float64, slow time.Duration
 	defer capt.Close()
 
 	smp := sampler.New(ratio, slow, uint64(time.Now().UnixNano()))
-	ag := agent.New(connmap.New(procRoot, pgPort), smp, exp.Export)
+	ag := agent.New(connmap.New(connmap.Config{ProcRoot: procRoot, PGPort: pgPort}), smp, exp.Export)
 	ag.Filter = capt
 	slog.Info("attached", "comm", comm, "pids", capt.Pids(), "sample_ratio", ratio, "slow", slow, "endpoint", endpoint)
 
