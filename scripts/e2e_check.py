@@ -3,7 +3,9 @@
 Prometheus and Grafana. Exits non-zero if any check fails."""
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -40,6 +42,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--ratio", type=float, required=True)
 ap.add_argument("--min-traces", type=int, required=True)
 ap.add_argument("--stats", required=True)
+ap.add_argument("--deploy", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy"))
 args = ap.parse_args()
 stats = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", args.stats)}
 
@@ -122,6 +125,19 @@ check("Grafana has the pgtrace dashboard", dash["dashboard"]["uid"] == "pgtrace"
 for ds in ("prometheus", "victoriatraces"):
     h = json.loads(get(f"http://localhost:3000/api/datasources/uid/{ds}/health"))
     check(f"Grafana datasource {ds} healthy", h.get("status") == "OK", h.get("message", ""))
+
+# --- caps, truncation, labelled metrics, cardinality ------------------------
+log = subprocess.run(["docker", "compose", "logs", "agent"], capture_output=True, text=True, cwd=args.deploy).stdout
+check("agent loaded BPF with capture_bytes=8192", "capture_bytes=8192" in log and "tracing process" in log)
+check("parser truncation counted for the 100 KB statement", val(r'^pgtrace_truncations_total\{layer="parser"\}') >= 2,
+      f'{val(r"^pgtrace_truncations_total\{layer=\"parser\"\}"):.0f} (client + server copies)')
+big = count('kind:2 "span_attr:pgtrace.truncated":true "span_attr:pgtrace.correlation":exact "span_attr:db.query.text":"select pg_sleep(0.15), length"*')
+check("the 100 KB statement is a truncated, exactly linked trace", big == 1, f"{big} matching roots")
+check("per-database pool-wait series for the tiny pool", val(r'^pgtrace_client_pool_wait_seconds_count\{[^}]*database="tiny"') > 0)
+check("per-client metrics carry database/user/client_addr labels",
+      re.search(r'^pgtrace_client_queries_total\{client_addr="[0-9.]+",database="postgres",user="postgres"\}', metrics, re.M) is not None)
+nseries = len([l for l in metrics.splitlines() if l.startswith("pgtrace_")])
+check("pgtrace series under the documented ceiling (limit 200: 8,331)", nseries <= 8331, f"{nseries} series")
 
 print("E2E PASSED" if failures == 0 else f"E2E FAILED ({failures} checks)")
 sys.exit(1 if failures else 0)

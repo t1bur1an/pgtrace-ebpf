@@ -23,7 +23,6 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
 
-
 // Span is a kept query plus the connection it was seen on.
 type Span struct {
 	Q      pgwire.Query

@@ -8,7 +8,10 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-#define MAX_PAYLOAD 4096
+// Compile-time ceiling on bytes copied per syscall; the runtime value is
+// capture_bytes (set by the agent before load). The per-CPU scratch event must
+// stay below the 32 KiB per-CPU allocation limit.
+#define MAX_PAYLOAD 16384
 #define EINPROGRESS 115
 #define AF_UNIX 1
 #define AF_INET 2
@@ -18,6 +21,8 @@
 #define WAKEUP_BYTES (1 << 20)
 
 #define CLASS_IGNORE 2
+
+const volatile __u32 capture_bytes = 4096;
 
 enum kind { K_DATA = 0, K_CONNECT = 1, K_CLOSE = 2, K_ACCEPT = 3 };
 enum dir { D_SEND = 0, D_RECV = 1 };
@@ -131,7 +136,11 @@ static __always_inline void emit_data(__s32 fd, void *buf, int ret, __u8 dir)
 	struct event *e = new_event(id, fd, K_DATA);
 	if (!e)
 		return;
-	__u32 n = ret > MAX_PAYLOAD ? MAX_PAYLOAD : (__u32)ret;
+	__u32 n = (__u32)ret;
+	if (n > capture_bytes)
+		n = capture_bytes;
+	if (n > MAX_PAYLOAD)
+		n = MAX_PAYLOAD;
 	e->dir = dir;
 	e->total_len = ret;
 	if (bpf_probe_read_user(e->payload, n, buf) != 0)

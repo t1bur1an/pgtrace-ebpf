@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"net/netip"
+	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/t1bur1an/pgtrace/internal/connmap"
 	"github.com/t1bur1an/pgtrace/internal/correlate"
 	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/export"
+	"github.com/t1bur1an/pgtrace/internal/metrics"
+	"github.com/t1bur1an/pgtrace/internal/pgwire"
 )
 
 func msg(typ byte, body string) []byte {
@@ -151,5 +156,34 @@ func TestStatsReadConcurrently(t *testing.T) {
 	}
 	if st := a.Stats(); st.Client != 1 || st.Server != 1 {
 		t.Fatalf("conn gauges %+v", st)
+	}
+}
+
+func TestTruncationsCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	met := metrics.New(reg)
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	a := New(cm, func(correlate.Trace, export.ClientInfo) {})
+	a.Metrics = met
+	a.Parser = pgwire.Options{MaxMessage: 64}
+	long := msg('Q', "select '"+strings.Repeat("x", 200)+"'\x00")
+	events := make(chan any, 4)
+	events <- event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+	events <- data(server, event.DirSend, 1, long) // cut by the parser at 64 bytes
+	// The kernel copied only part of this send.
+	events <- event.Data{TS: 2, Key: server, Dir: event.DirSend, TotalLen: uint32(len(long)), Payload: long[:40]}
+	close(events)
+	a.Run(context.Background(), events)
+	got := map[string]float64{}
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() == "pgtrace_truncations_total" {
+			for _, m := range mf.Metric {
+				got[m.Label[0].GetValue()] = m.Counter.GetValue()
+			}
+		}
+	}
+	if got["kernel"] != 1 || got["parser"] != 1 {
+		t.Fatalf("truncations %v", got)
 	}
 }

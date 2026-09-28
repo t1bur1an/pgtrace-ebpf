@@ -33,6 +33,10 @@ lg sh -c 'for i in 1 2 3 4 5; do
 	psql -qAtc "select pg_sleep(0.2)" >/dev/null
 	psql -d pgbouncer -qc "SHOW nonsense" 2>/dev/null
 done; true'
+echo "== a 100 KB statement (beyond the 64 KiB parser keep cap)"
+mkdir -p soak/gen
+python3 -c "print(\"select pg_sleep(0.15), length('\" + 'x' * 100000 + \"');\")" > soak/gen/e2e_big.sql
+lg psql -qAt -f /soak/gen/e2e_big.sql >/dev/null
 echo "== pool pressure: 16 clients on a 2-connection pool"
 lg sh -c 'for i in $(seq 1 16); do
 	(for n in 1 2 3 4 5; do psql -d tiny -qAtc "select pg_sleep(0.05), '"'"'c$i-$n'"'"'" >/dev/null; done) &

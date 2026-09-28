@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/export"
 	"github.com/t1bur1an/pgtrace/internal/metrics"
+	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
 )
 
@@ -41,6 +43,12 @@ type config struct {
 	statsEvery         time.Duration
 	bpfStats           bool
 	metricsAddr        string
+	captureBytes       int
+	maxMessage         int
+	maxQueryText       int
+	metricsLabels      string
+	labelLimit         int
+	labelTTL           time.Duration
 }
 
 func main() {
@@ -57,6 +65,13 @@ func main() {
 	flag.DurationVar(&c.statsEvery, "stats-interval", 10*time.Second, "stats log interval")
 	flag.BoolVar(&c.bpfStats, "bpf-stats", false, "enable kernel BPF run-time accounting")
 	flag.StringVar(&c.metricsAddr, "metrics-addr", ":9464", "Prometheus /metrics listen address (empty disables)")
+	flag.IntVar(&c.captureBytes, "capture-bytes", capture.DefaultCaptureBytes,
+		fmt.Sprintf("payload bytes copied by the kernel per send/recv (%d…%d)", capture.MinCaptureBytes, capture.MaxCaptureBytes))
+	flag.IntVar(&c.maxMessage, "max-message-bytes", pgwire.DefaultMaxMessage, "most bytes of one protocol message kept by the parser (memory is allocated per message, up to this)")
+	flag.IntVar(&c.maxQueryText, "max-query-text", export.DefaultMaxQueryText, "most bytes of SQL in db.query.text")
+	flag.StringVar(&c.metricsLabels, "metrics-labels", "", "opt-in per-client metric labels: comma list of database,user,client_addr")
+	flag.IntVar(&c.labelLimit, "metrics-label-limit", 200, "most distinct client label combinations tracked; extra ones are recorded as 'other'")
+	flag.DurationVar(&c.labelTTL, "metrics-label-ttl", 30*time.Minute, "client label combinations idle this long are removed")
 	flag.Parse()
 	applyEnv()
 
@@ -82,7 +97,35 @@ func applyEnv() {
 	})
 }
 
+func (c config) validate() ([]string, error) {
+	if c.maxMessage < 64 {
+		return nil, fmt.Errorf("-max-message-bytes must be at least 64")
+	}
+	if c.maxQueryText < 16 {
+		return nil, fmt.Errorf("-max-query-text must be at least 16")
+	}
+	var labels []string
+	for _, l := range strings.Split(c.metricsLabels, ",") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if !slices.Contains(metrics.LabelNames, l) {
+			return nil, fmt.Errorf("-metrics-labels: unknown label %q (want %s)", l, strings.Join(metrics.LabelNames, ","))
+		}
+		labels = append(labels, l)
+	}
+	if len(labels) > 0 && c.labelLimit < 1 {
+		return nil, fmt.Errorf("-metrics-label-limit must be at least 1")
+	}
+	return labels, nil
+}
+
 func run(c config) error {
+	labels, err := c.validate()
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -98,7 +141,8 @@ func run(c config) error {
 		}
 	}()
 
-	capt, err := capture.Start(ctx, capture.Config{Comm: c.comm, ProcRoot: c.procRoot, RescanEvery: 5 * time.Second, BPFStats: c.bpfStats})
+	capt, err := capture.Start(ctx, capture.Config{Comm: c.comm, ProcRoot: c.procRoot, RescanEvery: 5 * time.Second,
+		BPFStats: c.bpfStats, CaptureBytes: c.captureBytes})
 	if err != nil {
 		return fmt.Errorf("start capture (needs CAP_BPF/CAP_PERFMON or privileged): %w", err)
 	}
@@ -106,7 +150,8 @@ func run(c config) error {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	met := metrics.New(reg)
+	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
+	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }})
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
 	if c.metricsAddr != "" {
 		srv := &http.Server{Addr: c.metricsAddr, Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{})}
@@ -124,7 +169,7 @@ func run(c config) error {
 	serverAddr := func(k event.ConnKey) netip.AddrPort { info, _ := cm.Peek(k); return info.Remote }
 	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
 	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
-		met.ObserveTrace(tr)
+		met.ObserveTrace(tr, metricsClient(client))
 		keep, reason := smp.DecideTrace(tr)
 		met.SpanDecision(reason, keep)
 		if keep {
@@ -133,8 +178,11 @@ func run(c config) error {
 	})
 	ag.Filter = capt
 	ag.Metrics = met
+	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
-		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr)
+		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
+		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
+		"metrics_labels", labels, "metrics_label_limit", c.labelLimit)
 
 	go func() {
 		t := time.NewTicker(c.statsEvery)
@@ -146,6 +194,7 @@ func run(c config) error {
 			case <-t.C:
 				st, ss, cs := ag.Stats(), smp.Stats(), ag.CorrelationStats()
 				met.SetTracedProcesses(len(capt.Pids()))
+				met.Evict()
 				met.SetConnections("server", int(st.Server))
 				met.SetConnections("client", int(st.Client))
 				bpfTime, bpfRuns := capt.ProgStats()
@@ -162,4 +211,14 @@ func run(c config) error {
 	ag.Run(ctx, capt.Events)
 	slog.Info("shutting down")
 	return nil
+}
+
+// metricsClient maps a trace's client details to metric label values. Clients
+// without an address are unix-socket clients.
+func metricsClient(c export.ClientInfo) metrics.Client {
+	addr := "unix"
+	if c.Addr.IsValid() {
+		addr = c.Addr.Addr().String()
+	}
+	return metrics.Client{Database: c.Params["database"], User: c.Params["user"], Addr: addr}
 }

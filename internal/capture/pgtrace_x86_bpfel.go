@@ -26,7 +26,7 @@ type pgtraceEvent struct {
 	Port     [2]uint8
 	Pad      [2]uint8
 	Addr     [16]uint8
-	Payload  [4096]uint8
+	Payload  [16384]uint8
 }
 
 type pgtraceFdKey struct {
@@ -49,6 +49,7 @@ const (
 	pgtraceProgExitConnect  = "exit_connect"
 	pgtraceProgExitRecvfrom = "exit_recvfrom"
 	pgtraceProgExitSendto   = "exit_sendto"
+	pgtraceVarCaptureBytes  = "capture_bytes"
 )
 
 // loadPgtrace returns the embedded CollectionSpec for pgtrace.
@@ -115,6 +116,7 @@ type pgtraceMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type pgtraceVariableSpecs struct {
+	CaptureBytes *ebpf.VariableSpec `ebpf:"capture_bytes"`
 }
 
 // pgtraceObjects contains all objects after they have been loaded into the kernel.
@@ -158,6 +160,7 @@ func (m *pgtraceMaps) Close() error {
 //
 // It can be passed to loadPgtraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type pgtraceVariables struct {
+	CaptureBytes *ebpf.Variable `ebpf:"capture_bytes"`
 }
 
 // pgtracePrograms contains all programs after they have been loaded into the kernel.

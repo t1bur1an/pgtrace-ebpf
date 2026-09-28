@@ -46,7 +46,8 @@ type conn struct {
 
 type Agent struct {
 	Filter  Filter           // optional
-	Metrics *metrics.Metrics // optional: event counts and connection gauges
+	Metrics *metrics.Metrics // optional: event counts, truncations
+	Parser  pgwire.Options   // per-connection parser options
 
 	cm    *connmap.Map
 	sink  Sink
@@ -161,9 +162,9 @@ func (a *Agent) data(ev event.Data) {
 		info := a.cm.Lookup(ev.Key)
 		switch info.Side {
 		case connmap.SideServer:
-			c = &conn{side: info.Side, p: pgwire.NewConn(), addr: info.Remote}
+			c = &conn{side: info.Side, p: pgwire.NewConnWith(false, a.Parser), addr: info.Remote}
 		case connmap.SideClient:
-			c = &conn{side: info.Side, p: pgwire.NewClientConn(), addr: info.Remote}
+			c = &conn{side: info.Side, p: pgwire.NewConnWith(true, a.Parser), addr: info.Remote}
 		default:
 			a.ignore(ev.Key)
 			return
@@ -176,6 +177,14 @@ func (a *Agent) data(ev event.Data) {
 		a.cor.ClientRecv(pid, ev.Key, ev.TS)
 	}
 	r := c.p.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen)
+	if a.Metrics != nil {
+		if uint32(len(ev.Payload)) < ev.TotalLen {
+			a.Metrics.Truncation("kernel")
+		}
+		for i := 0; i < r.Truncated; i++ {
+			a.Metrics.Truncation("parser")
+		}
+	}
 	for _, st := range r.Started {
 		if c.side == connmap.SideServer {
 			a.cor.ServerStarted(pid, ev.Key, st)

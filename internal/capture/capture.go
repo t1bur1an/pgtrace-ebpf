@@ -28,6 +28,22 @@ type Config struct {
 	ProcRoot    string        // usually /proc (host pid namespace)
 	RescanEvery time.Duration // pid discovery interval
 	BPFStats    bool          // enable kernel run-time accounting (small per-run cost)
+	// CaptureBytes is the most payload bytes copied per send/recv call
+	// (DefaultCaptureBytes if 0, at most MaxCaptureBytes).
+	CaptureBytes int
+}
+
+const (
+	DefaultCaptureBytes = 4096
+	MinCaptureBytes     = 64
+	MaxCaptureBytes     = 16384 // MAX_PAYLOAD in bpf/pgtrace.bpf.c
+)
+
+func validateCaptureBytes(n int) error {
+	if n != 0 && (n < MinCaptureBytes || n > MaxCaptureBytes) {
+		return fmt.Errorf("capture bytes %d outside %d…%d", n, MinCaptureBytes, MaxCaptureBytes)
+	}
+	return nil
 }
 
 // pollInterval bounds how long events wait in the ring: the BPF side only
@@ -63,8 +79,21 @@ func Start(ctx context.Context, cfg Config) (*Capture, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock: %w", err)
 	}
+	if err := validateCaptureBytes(cfg.CaptureBytes); err != nil {
+		return nil, err
+	}
+	if cfg.CaptureBytes == 0 {
+		cfg.CaptureBytes = DefaultCaptureBytes
+	}
+	spec, err := loadPgtrace()
+	if err != nil {
+		return nil, fmt.Errorf("load bpf spec: %w", err)
+	}
+	if err := spec.Variables["capture_bytes"].Set(uint32(cfg.CaptureBytes)); err != nil {
+		return nil, fmt.Errorf("set capture_bytes: %w", err)
+	}
 	c := &Capture{pids: map[uint32]bool{}}
-	if err := loadPgtraceObjects(&c.objs, nil); err != nil {
+	if err := spec.LoadAndAssign(&c.objs, nil); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			return nil, fmt.Errorf("load bpf: %+v", ve)

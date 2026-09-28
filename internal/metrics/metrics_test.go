@@ -26,9 +26,9 @@ func TestObserveTrace(t *testing.T) {
 	m.ObserveTrace(correlate.Trace{
 		Client: &correlate.ClientQuery{Q: root},
 		Server: []correlate.ServerQuery{{Q: child, Correlation: "exact"}},
-	})
-	m.ObserveTrace(correlate.Trace{Server: []correlate.ServerQuery{{Q: q("frobnicate", 1, "XX000"), Correlation: "none"}}})
-	m.ObserveTrace(correlate.Trace{Client: &correlate.ClientQuery{Q: q("SHOW", 1, "08P01-bad")}})
+	}, Client{})
+	m.ObserveTrace(correlate.Trace{Server: []correlate.ServerQuery{{Q: q("frobnicate", 1, "XX000"), Correlation: "none"}}}, Client{})
+	m.ObserveTrace(correlate.Trace{Client: &correlate.ClientQuery{Q: q("SHOW", 1, "08P01-bad")}}, Client{})
 
 	if v := testutil.ToFloat64(m.queries.WithLabelValues("client", "SELECT", "simple")); v != 1 {
 		t.Fatalf("client queries %v", v)
@@ -84,9 +84,19 @@ func TestLabels(t *testing.T) {
 		}
 	}
 	for in, want := range map[string]string{"22012": "22012", "": "", "abc": "OTHER", "123456": "OTHER"} {
-		if got := sqlstateLabel(in); got != want {
+		if got := New(prometheus.NewRegistry()).sqlstateLabel(in); got != want {
 			t.Errorf("sqlstateLabel(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestTruncationCounter(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.Truncation("kernel")
+	m.Truncation("parser")
+	m.Truncation("parser")
+	if testutil.ToFloat64(m.truncations.WithLabelValues("parser")) != 2 || testutil.ToFloat64(m.truncations.WithLabelValues("kernel")) != 1 {
+		t.Fatal("truncation counts")
 	}
 }
 
@@ -121,6 +131,6 @@ func BenchmarkObserveTrace(b *testing.B) {
 	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: root}, Server: []correlate.ServerQuery{{Q: child, Correlation: "exact"}}}
 	b.ReportAllocs()
 	for b.Loop() {
-		m.ObserveTrace(tr)
+		m.ObserveTrace(tr, Client{})
 	}
 }

@@ -99,3 +99,11 @@ func TestDecodeAccept(t *testing.T) {
 		t.Fatalf("unix accept %+v", a)
 	}
 }
+
+func TestValidateCaptureBytes(t *testing.T) {
+	for n, ok := range map[int]bool{0: true, 64: true, 4096: true, 16384: true, 63: false, 16385: false, -1: false} {
+		if err := validateCaptureBytes(n); (err == nil) != ok {
+			t.Errorf("validateCaptureBytes(%d) = %v", n, err)
+		}
+	}
+}
