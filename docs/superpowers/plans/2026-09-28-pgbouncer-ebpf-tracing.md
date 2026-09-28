@@ -189,3 +189,13 @@
   5. Assert with jq: ≥10 error spans (22012 and 42P01 present), ≥5 spans with duration ≥200ms and SQL containing pg_sleep, operations include SELECT/UPDATE/INSERT, total spans between 5% and 20% of pgbench statements (+ forced ones).
   Print PASS/FAIL summary; exit non-zero on failure.
 - [ ] Step 1: write files. Step 2: `make e2e` passes. Step 3: README with usage. Commit.
+
+### Task 9: Performance tests + written results (added at user request 2026-09-28)
+
+**Files:**
+- Create: `internal/pgwire/bench_test.go`, `internal/agent/bench_test.go`, `scripts/perf.sh`, `docs/performance.md`
+
+- Go benchmarks: `BenchmarkConnSimpleQuery`, `BenchmarkConnExtendedQuery` (bytes/op, allocs/op, ns/query), `BenchmarkPipeline` (agent.Run over pre-built events with sampler at 0.1 and a no-op sink → events/s).
+- `scripts/perf.sh`: against the compose stack, for clients in {1, 8, 32, 64} run `pgbench -S` (select-only, maximises query rate) and TPC-B-like, 30 s each, `-M simple` and `-M extended`, first with agent stopped (baseline) then running. Record TPS, avg latency, agent CPU% and RSS (`docker stats --no-stream` sampled every 2 s), agent's ringbuf drop counter and queries-seen from its stats log, and span count in VictoriaTraces vs expected. Output CSV into `docs/perf-results/`.
+- `docs/performance.md`: method, hardware (CPU model, cores, kernel), results table, overhead %, max sustained query rate without drops, findings/limits.
+- [ ] benchmarks run; perf.sh run; results doc written; commit.
