@@ -86,4 +86,6 @@ services:
       PGUSER: postgres
       PGPASSWORD: postgres
       PGDATABASE: postgres
+    volumes:
+      - ./soak:/soak:ro
     entrypoint: []
