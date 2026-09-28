@@ -19,7 +19,7 @@ VT = "http://localhost:10428/select/logsql/query"
 COLS = ["ts", "agent_running", "agent_started", "agent_restarts", "agent_rss", "agent_heap_inuse", "goroutines",
         "agent_cpu_usec", "pgbouncer_cpu_usec", "postgres_cpu_usec", "events", "q_client", "q_server",
         "corr_exact", "corr_inferred", "corr_internal", "corr_none", "corr_orphan",
-        "kept_error", "kept_slow", "kept_ratio", "dropped", "kernel_drops", "conns_client", "conns_server",
+        "kept_error", "kept_slow", "kept_parent", "kept_ratio", "dropped", "kernel_drops", "conns_client", "conns_server",
         "vt_spans_1m", "vt_truncated_1m"]
 
 
@@ -50,7 +50,7 @@ def metrics():
         "goroutines": s("go_goroutines"), "events": s("pgtrace_events_total"),
         "q_client": lab("pgtrace_queries_total", 'side="client"'), "q_server": lab("pgtrace_queries_total", 'side="server"'),
         **{f"corr_{r}": lab("pgtrace_correlation_total", f'result="{r}"') for r in ("exact", "inferred", "internal", "none", "orphan")},
-        **{d: lab("pgtrace_spans_total", f'decision="{d}"') for d in ("kept_error", "kept_slow", "kept_ratio", "dropped")},
+        **{d: lab("pgtrace_spans_total", f'decision="{d}"') for d in ("kept_error", "kept_slow", "kept_parent", "kept_ratio", "dropped")},
         "kernel_drops": s("pgtrace_kernel_drops_total"),
         "conns_client": lab("pgtrace_connections", 'side="client"'), "conns_server": lab("pgtrace_connections", 'side="server"'),
     }
@@ -125,7 +125,7 @@ def report(out):
           f"{d('corr_exact'):.0f} exact, {d('corr_inferred'):.0f} inferred, {d('corr_orphan'):.0f} orphan, "
           f"{d('corr_internal'):.0f} internal, {d('corr_none'):.0f} none")
 
-    kept = sum(f(last[k]) for k in ("kept_error", "kept_slow", "kept_ratio"))
+    kept = sum(f(last[k]) or 0 for k in ("kept_error", "kept_slow", "kept_parent", "kept_ratio"))
     stored = count("kind:2") + count('kind:3 "span_attr:pgtrace.correlation":none') + count('kind:3 -"span_attr:pgtrace.correlation":none parent_span_id:""')
     check("every kept trace reached VictoriaTraces (±0.1 %)", kept and abs(stored - kept) <= 0.001 * kept, f"{stored} stored / {kept:.0f} kept")
     export_errs = [l for l in agent_log.splitlines() if re.search(r"(?i)export|otlp|invalid utf-8", l) and re.search(r"(?i)error|fail|drop", l)]

@@ -52,10 +52,10 @@ code = lambda c: f'"span_attr:db.response.status_code":"{c}"'
 # --- volume, loss, sampling -------------------------------------------------
 check("no kernel drops", stats["kernel_drops"] == 0, f'{stats["kernel_drops"]} drops')
 check(f"agent saw >= {args.min_traces} traces", stats["traces"] >= args.min_traces, f'{stats["traces"]}')
-kept = stats["kept_error"] + stats["kept_slow"] + stats["kept_ratio"]
+kept = stats["kept_error"] + stats["kept_slow"] + stats.get("kept_parent", 0) + stats["kept_ratio"]
 exported = count(f'{ROOT}') + count(f'{CHILD} "span_attr:pgtrace.correlation":none')
 check("every kept trace reached VictoriaTraces", exported == kept, f"{exported} stored / {kept} kept")
-normal = stats["traces"] - stats["kept_error"] - stats["kept_slow"]
+normal = stats["traces"] - stats["kept_error"] - stats["kept_slow"] - stats.get("kept_parent", 0)
 r = stats["kept_ratio"] / normal
 check(f"ratio-sampled share within ±20% of {args.ratio}", abs(r - args.ratio) <= 0.2 * args.ratio, f"{r:.4f}")
 
@@ -137,7 +137,17 @@ check("per-database pool-wait series for the tiny pool", val(r'^pgtrace_client_p
 check("per-client metrics carry database/user/client_addr labels",
       re.search(r'^pgtrace_client_queries_total\{client_addr="[0-9.]+",database="postgres",user="postgres"\}', metrics, re.M) is not None)
 nseries = len([l for l in metrics.splitlines() if l.startswith("pgtrace_")])
-check("pgtrace series under the documented ceiling (limit 200: 8,331)", nseries <= 8331, f"{nseries} series")
+check("pgtrace series under the documented ceiling (limit 200: 8,335)", nseries <= 8335, f"{nseries} series")
+
+# --- SQLCommenter trace context -----------------------------------------------
+TID, PSID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+root = logsql(f'kind:2 trace_id:{TID} | fields parent_span_id, "span_attr:pgtrace.trace_context", "span_attr:sqlcommenter.application", "span_attr:pgtrace.sample_reason"')
+kids = count(f"kind:3 trace_id:{TID}")
+check("SQLCommenter traceparent parents the pgbouncer span (fast query kept: parent sampled)",
+      len(root) == 1 and root[0].get("parent_span_id") == PSID and root[0].get("span_attr:pgtrace.trace_context") == "sqlcommenter"
+      and root[0].get("span_attr:sqlcommenter.application") == "e2e" and root[0].get("span_attr:pgtrace.sample_reason") == "parent" and kids == 1,
+      f"{root} / {kids} child")
+check("/metrics counts linked trace contexts", val(r'^pgtrace_trace_context_total\{result="linked"\}') >= 1)
 
 print("E2E PASSED" if failures == 0 else f"E2E FAILED ({failures} checks)")
 sys.exit(1 if failures else 0)

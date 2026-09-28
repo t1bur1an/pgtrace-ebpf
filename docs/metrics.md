@@ -21,14 +21,15 @@ addresses (`internal/metrics/cardinality_test.go`).
 | `pgtrace_query_errors_total` | counter | `side` · `sqlstate` = up to 300 distinct 5-char codes + `OTHER` | 602 |
 | `pgtrace_pool_wait_seconds` | histogram | – | 15 |
 | `pgtrace_correlation_total` | counter | `result` = exact, inferred, internal, none, orphan | 5 |
-| `pgtrace_spans_total` | counter | `decision` = kept_error, kept_slow, kept_ratio, dropped | 4 |
+| `pgtrace_spans_total` | counter | `decision` = kept_error, kept_slow, kept_parent, kept_ratio, dropped | 5 |
 | `pgtrace_events_total` | counter | `kind` = data, connect, accept, close | 4 |
 | `pgtrace_truncations_total` | counter | `layer` = kernel, parser, export | 3 |
+| `pgtrace_trace_context_total` | counter | `result` = linked, not_per_execution, invalid (SQLCommenter) | 3 |
 | `pgtrace_connections` | gauge | `side` = client, server | 2 |
 | `pgtrace_traced_processes` | gauge | – | 1 |
 | `pgtrace_kernel_drops_total` | counter | – | 1 |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | counter | – (only with `-bpf-stats`) | 2 |
-| **base ceiling** | | | **1 897** |
+| **base ceiling** | | | **1 901** |
 
 The `operation` keywords are SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT,
 END, ROLLBACK, SET, SHOW, WITH, COPY, CREATE, ALTER, DROP, TRUNCATE, VACUUM,
@@ -79,10 +80,10 @@ combination that comes back starts its counters from zero, which Prometheus
 
 | `-metrics-label-limit` | max pgtrace series |
 |---:|---:|
-| labels off | 1 897 |
-| 50 | 3 531 |
-| 200 (default) | 8 331 |
-| 1 000 | 33 931 |
+| labels off | 1 901 |
+| 50 | 3 535 |
+| 200 (default) | 8 335 |
+| 1 000 | 33 935 |
 
 Choose the limit from your Prometheus budget. If
 `pgtrace_metrics_label_overflow_total` keeps rising, there are more active

@@ -31,6 +31,7 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/metrics"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
+	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
 )
 
 type config struct {
@@ -49,6 +50,8 @@ type config struct {
 	metricsLabels      string
 	labelLimit         int
 	labelTTL           time.Duration
+	sqlcommenter       bool
+	parentSampling     bool
 }
 
 func main() {
@@ -72,6 +75,8 @@ func main() {
 	flag.StringVar(&c.metricsLabels, "metrics-labels", "", "opt-in per-client metric labels: comma list of database,user,client_addr")
 	flag.IntVar(&c.labelLimit, "metrics-label-limit", 200, "most distinct client label combinations tracked; extra ones are recorded as 'other'")
 	flag.DurationVar(&c.labelTTL, "metrics-label-ttl", 30*time.Minute, "client label combinations idle this long are removed")
+	flag.BoolVar(&c.sqlcommenter, "sqlcommenter", true, "read SQLCommenter comments; a traceparent makes the application span the parent of the pgbouncer span")
+	flag.BoolVar(&c.parentSampling, "sqlcommenter-parent-sampling", true, "always keep traces whose SQLCommenter parent is sampled")
 	flag.Parse()
 	applyEnv()
 
@@ -170,7 +175,10 @@ func run(c config) error {
 	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
 	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
 		met.ObserveTrace(tr, metricsClient(client))
-		keep, reason := smp.DecideTrace(tr)
+		if c.sqlcommenter && tr.Client != nil {
+			client = withComment(client, tr.Client.Q, met)
+		}
+		keep, reason := smp.DecideTraceParent(tr, c.parentSampling && client.UseParent && export.Sampled(client.Comment))
 		met.SpanDecision(reason, keep)
 		if keep {
 			exp.ExportTrace(tr, reason, client, serverAddr)
@@ -182,7 +190,7 @@ func run(c config) error {
 	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
-		"metrics_labels", labels, "metrics_label_limit", c.labelLimit)
+		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter)
 
 	go func() {
 		t := time.NewTicker(c.statsEvery)
@@ -200,7 +208,7 @@ func run(c config) error {
 				bpfTime, bpfRuns := capt.ProgStats()
 				slog.Info("stats", "events", st.Events, "queries", st.Queries,
 					"server_conns", st.Server, "client_conns", st.Client, "traces", ss["seen"],
-					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_ratio", ss["kept_ratio"],
+					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_parent", ss["kept_parent"], "kept_ratio", ss["kept_ratio"],
 					"corr_exact", cs[correlate.Exact], "corr_inferred", cs[correlate.Inferred], "corr_none", cs[correlate.None],
 					"corr_internal", cs["internal"], "corr_orphan", cs["orphan"],
 					"kernel_drops", capt.Drops(), "bpf_runs", bpfRuns, "bpf_ns", bpfTime.Nanoseconds())
@@ -221,4 +229,25 @@ func metricsClient(c export.ClientInfo) metrics.Client {
 		addr = c.Addr.Addr().String()
 	}
 	return metrics.Client{Database: c.Params["database"], User: c.Params["user"], Addr: addr}
+}
+
+// withComment attaches the client query's SQLCommenter comment. Its trace
+// context is used only if the SQL was sent for this execution: a traceparent
+// inside a reused prepared statement belongs to whichever request prepared it.
+func withComment(client export.ClientInfo, q pgwire.Query, met *metrics.Metrics) export.ClientInfo {
+	cm, ok := sqlcomment.Parse(q.SQL)
+	if !ok {
+		return client
+	}
+	client.Comment = cm
+	switch {
+	case cm.Valid && q.PerExecution:
+		client.UseParent = true
+		met.TraceContext("linked")
+	case cm.Valid:
+		met.TraceContext("not_per_execution")
+	case cm.HadContext:
+		met.TraceContext("invalid")
+	}
+	return client
 }

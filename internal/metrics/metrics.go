@@ -57,17 +57,18 @@ type labelled struct {
 }
 
 type Metrics struct {
-	queries     *prometheus.CounterVec
-	duration    *prometheus.HistogramVec
-	errors      *prometheus.CounterVec
-	poolWait    prometheus.Histogram
-	correlation *prometheus.CounterVec
-	spans       *prometheus.CounterVec
-	events      *prometheus.CounterVec
-	truncations *prometheus.CounterVec
-	conns       *prometheus.GaugeVec
-	processes   prometheus.Gauge
-	reg         prometheus.Registerer
+	queries      *prometheus.CounterVec
+	duration     *prometheus.HistogramVec
+	errors       *prometheus.CounterVec
+	poolWait     prometheus.Histogram
+	correlation  *prometheus.CounterVec
+	spans        *prometheus.CounterVec
+	events       *prometheus.CounterVec
+	truncations  *prometheus.CounterVec
+	traceContext *prometheus.CounterVec
+	conns        *prometheus.GaugeVec
+	processes    prometheus.Gauge
+	reg          prometheus.Registerer
 
 	cfg       Config
 	labelled  *labelled
@@ -115,6 +116,10 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_truncations_total",
 			Help: "Truncations by layer: kernel (capture-bytes per syscall), parser (max-message-bytes), export (max-query-text).",
 		}, []string{"layer"}),
+		traceContext: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_trace_context_total",
+			Help: "SQLCommenter trace context on client queries: linked, not_per_execution (reused prepared statement), invalid.",
+		}, []string{"result"}),
 		conns: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "pgtrace_connections", Help: "Tracked pgbouncer sockets, by side.",
 		}, []string{"side"}),
@@ -122,7 +127,7 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_traced_processes", Help: "pgbouncer processes being traced.",
 		}),
 	}
-	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.conns, m.processes)
+	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.conns, m.processes)
 	if len(cfg.Labels) > 0 {
 		m.registerLabelled()
 	}
@@ -176,7 +181,7 @@ func MaxSeries(cfg Config) int {
 		2*ops*h + // query_duration_seconds
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
 		h + // pool_wait_seconds
-		5 + 4 + 4 + 3 + 2 + 1 + // correlation, spans, events, truncations, connections, traced_processes
+		5 + 5 + 4 + 3 + 3 + 2 + 1 + // correlation, spans, events, truncations, trace_context, connections, traced_processes
 		1 + 2 // kernel drops, bpf run time/runs
 	if len(cfg.Labels) > 0 {
 		n += (cfg.Limit+1)*SeriesPerLabelSet + 2 // +1 for 'other'; label_sets, overflow
@@ -310,6 +315,7 @@ func (m *Metrics) SpanDecision(reason sampler.Reason, kept bool) {
 
 func (m *Metrics) Event(kind string)                 { m.events.WithLabelValues(kind).Inc() }
 func (m *Metrics) Truncation(layer string)           { m.truncations.WithLabelValues(layer).Inc() }
+func (m *Metrics) TraceContext(result string)        { m.traceContext.WithLabelValues(result).Inc() }
 func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
 func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
 

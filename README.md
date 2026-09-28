@@ -46,7 +46,17 @@ unforwarded query has the same signature (SQL plus bind values). When several
 clients wait with identical queries, the link is marked `inferred`. Details:
 `docs/superpowers/specs/2026-09-28-client-correlation-and-observability-design.md`.
 
-Performance: `docs/performance.md`.
+**Joining application traces (SQLCommenter):** if the application appends a
+[SQLCommenter](https://google.github.io/sqlcommenter/) comment with a W3C
+`traceparent` to its SQL (`… /*traceparent='00-<trace>-<span>-01'*/`), the
+pgbouncer root span becomes a child of the application's span. One trace then
+shows application → pgbouncer (pool wait) → postgres. Other comment keys
+(`application`, `route`, …) become `sqlcommenter.*` attributes. A sampled
+parent means the trace is always kept (`pgtrace.sample_reason=parent`). A
+traceparent inside a *reused* prepared statement is ignored, since it belongs
+to whichever request prepared it (counted as `not_per_execution`).
+
+Performance: `docs/performance.md`. Metrics and cardinality: `docs/metrics.md`.
 
 ## Quick start
 
@@ -98,6 +108,8 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-metrics-labels` | *(off)* | opt-in per-client metrics: any of `database,user,client_addr` |
 | `-metrics-label-limit` | `200` | most label combinations tracked; extra ones are recorded as `other` |
 | `-metrics-label-ttl` | `30m` | idle label combinations are removed after this |
+| `-sqlcommenter` | `true` | read SQLCommenter comments; a `traceparent` parents the pgbouncer span |
+| `-sqlcommenter-parent-sampling` | `true` | always keep traces whose SQLCommenter parent is sampled |
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.
@@ -118,10 +130,11 @@ host pid namespace.
 | `pgtrace_traced_processes` | | pgbouncer processes |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | | with `-bpf-stats` |
 | `pgtrace_truncations_total` | `layer` | kernel / parser / export: which size cap fired |
+| `pgtrace_trace_context_total` | `result` | SQLCommenter: linked / not_per_execution / invalid |
 | `pgtrace_client_*` | enabled client labels | opt-in (`-metrics-labels`): queries, errors, duration, pool wait per database/user/client IP |
 
 Plus the standard Go and process collectors. Every label is bounded; the
-series ceiling is 1,897 without client labels and 8,331 with the default
+series ceiling is 1,901 without client labels and 8,335 with the default
 label limit. See `docs/metrics.md` for every series and how to size the limit.
 
 ## Development

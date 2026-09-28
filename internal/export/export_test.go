@@ -17,6 +17,7 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
+	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
 )
 
 const (
@@ -224,5 +225,54 @@ func TestMaxQueryTextOption(t *testing.T) {
 	}
 	if cut != 1 {
 		t.Fatalf("truncation hook called %d times", cut)
+	}
+}
+
+func TestExportTraceWithRemoteParent(t *testing.T) {
+	e, mem := newTest(t)
+	tr := correlate.Trace{
+		Client: &correlate.ClientQuery{Key: event.ConnKey{PID: 1, FD: 3}, Q: pgwire.Query{Start: 1, End: 10, SQL: "select 1 /*...*/", Operation: "SELECT"}},
+		Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 4}, Correlation: "exact", Q: pgwire.Query{Start: 2, End: 9, Operation: "SELECT"}}},
+	}
+	info := ClientInfo{
+		Comment:   sqlcomment.Comment{TraceParent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", TraceState: "congo=t61rcWkgMzE", Valid: true, Attrs: map[string]string{"route": "/orders"}},
+		UseParent: true,
+	}
+	e.ExportTrace(tr, sampler.ReasonParent, info, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
+	spans := mem.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("%d spans", len(spans))
+	}
+	for _, s := range spans {
+		if s.SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" {
+			t.Fatalf("trace id %s", s.SpanContext.TraceID())
+		}
+		if s.SpanKind == trace.SpanKindServer {
+			if s.Parent.SpanID().String() != "00f067aa0ba902b7" || !s.Parent.IsRemote() {
+				t.Fatalf("root parent %v remote=%v", s.Parent.SpanID(), s.Parent.IsRemote())
+			}
+			a := attrs(s.Attributes)
+			if a["pgtrace.trace_context"].AsString() != "sqlcommenter" || a["sqlcommenter.route"].AsString() != "/orders" {
+				t.Fatalf("root attrs %v", a)
+			}
+		}
+	}
+	// Without UseParent the comment attributes are kept but the span is a root.
+	mem.Reset()
+	info.UseParent = false
+	e.ExportTrace(tr, sampler.ReasonRatio, info, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
+	for _, s := range mem.GetSpans() {
+		if s.SpanKind == trace.SpanKindServer && (s.Parent.IsValid() || attrs(s.Attributes)["sqlcommenter.route"].AsString() != "/orders") {
+			t.Fatalf("not-per-execution comment: parent=%v attrs=%v", s.Parent, attrs(s.Attributes))
+		}
+	}
+}
+
+func TestSampledFlag(t *testing.T) {
+	for flags, want := range map[string]bool{"01": true, "00": false, "0b": true, "02": false, "ff": true} {
+		c := sqlcomment.Comment{Valid: true, TraceParent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-" + flags}
+		if Sampled(c) != want {
+			t.Errorf("flags %s: sampled=%v", flags, !want)
+		}
 	}
 }

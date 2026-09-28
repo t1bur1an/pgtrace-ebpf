@@ -90,6 +90,16 @@ func TestLabels(t *testing.T) {
 	}
 }
 
+func TestTraceContextCounter(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.TraceContext("linked")
+	m.TraceContext("invalid")
+	m.TraceContext("linked")
+	if testutil.ToFloat64(m.traceContext.WithLabelValues("linked")) != 2 || testutil.ToFloat64(m.traceContext.WithLabelValues("invalid")) != 1 {
+		t.Fatal("trace context counts")
+	}
+}
+
 func TestTruncationCounter(t *testing.T) {
 	m := New(prometheus.NewRegistry())
 	m.Truncation("kernel")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/event"
 	"github.com/t1bur1an/pgtrace/internal/pgwire"
 	"github.com/t1bur1an/pgtrace/internal/sampler"
+	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
 )
 
 // Span is a kept query plus the connection it was seen on.
@@ -104,6 +106,11 @@ func (e *Exporter) Export(s Span) {
 type ClientInfo struct {
 	Addr   netip.AddrPort    // invalid for unix sockets or unknown
 	Params map[string]string // startup parameters, if seen
+	// Comment is the root query's SQLCommenter comment, if any. Its
+	// attributes are always exported; its traceparent becomes the root
+	// span's parent only when UseParent is set.
+	Comment   sqlcomment.Comment
+	UseParent bool
 }
 
 // ExportTrace exports a client query as a SERVER span (pgbouncer serving the
@@ -147,7 +154,17 @@ func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client 
 	if len(t.Server) > 0 && t.Server[0].Q.Start >= q.Start {
 		attrs = append(attrs, attribute.Float64("pgbouncer.pool_wait_ms", float64(t.Server[0].Q.Start-q.Start)/1e6))
 	}
-	ctx, end := e.start(context.Background(), trace.SpanKindServer, q, attrs)
+	for k, v := range client.Comment.Attrs {
+		attrs = append(attrs, attribute.String("sqlcommenter."+k, v))
+	}
+	ctx := context.Background()
+	if client.UseParent {
+		if sc, ok := remoteParent(client.Comment); ok {
+			ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
+			attrs = append(attrs, attribute.String("pgtrace.trace_context", "sqlcommenter"))
+		}
+	}
+	ctx, end := e.start(ctx, trace.SpanKindServer, q, attrs)
 	for _, sq := range t.Server {
 		child(ctx, sq)
 	}
@@ -166,6 +183,38 @@ func clean(s string, max int) string {
 		s = s[:cut]
 	}
 	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
+// Sampled reports whether a valid traceparent has the sampled flag set.
+func Sampled(c sqlcomment.Comment) bool {
+	if !c.Valid {
+		return false
+	}
+	f, err := strconv.ParseUint(c.TraceParent[len(c.TraceParent)-2:], 16, 8)
+	return err == nil && f&1 == 1
+}
+
+// remoteParent turns a validated traceparent into the span context of the
+// application span the query ran under.
+func remoteParent(c sqlcomment.Comment) (trace.SpanContext, bool) {
+	if !c.Valid {
+		return trace.SpanContext{}, false
+	}
+	p := strings.Split(c.TraceParent, "-")
+	tid, err1 := trace.TraceIDFromHex(p[1])
+	sid, err2 := trace.SpanIDFromHex(p[2])
+	if err1 != nil || err2 != nil {
+		return trace.SpanContext{}, false
+	}
+	flags := trace.TraceFlags(0)
+	if Sampled(c) {
+		flags = trace.FlagsSampled
+	}
+	cfg := trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: flags, Remote: true}
+	if ts, err := trace.ParseTraceState(c.TraceState); err == nil {
+		cfg.TraceState = ts
+	}
+	return trace.NewSpanContext(cfg), true
 }
 
 // queryAttrs are the attributes shared by client and server query spans.

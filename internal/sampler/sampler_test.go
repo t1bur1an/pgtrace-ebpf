@@ -72,3 +72,18 @@ func TestDecideTrace(t *testing.T) {
 		t.Fatalf("slow lone server query: %v %q", keep, r)
 	}
 }
+
+func TestSampledParentKept(t *testing.T) {
+	s := New(0, 100*time.Millisecond, 1)
+	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: fast()}}
+	if keep, r := s.DecideTraceParent(tr, true); !keep || r != ReasonParent {
+		t.Fatalf("sampled parent: %v %q", keep, r)
+	}
+	if keep, _ := s.DecideTraceParent(tr, false); keep {
+		t.Fatal("unsampled parent at ratio 0 must be dropped")
+	}
+	failed := correlate.Trace{Client: &correlate.ClientQuery{Q: pgwire.Query{ErrorCode: "40P01"}}}
+	if _, r := s.DecideTraceParent(failed, true); r != ReasonError {
+		t.Fatalf("error takes precedence: %q", r)
+	}
+}

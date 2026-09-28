@@ -18,6 +18,8 @@ const (
 	ReasonError Reason = "error"
 	ReasonSlow  Reason = "slow"
 	ReasonRatio Reason = "ratio"
+	// ReasonParent: the application's sampled trace (SQLCommenter traceparent) includes this query.
+	ReasonParent Reason = "parent"
 )
 
 // Sampler keeps every failed or slow query and a random fraction of the rest.
@@ -40,12 +42,19 @@ func New(ratio float64, slow time.Duration, seed uint64) *Sampler {
 }
 
 func (s *Sampler) Decide(q pgwire.Query) (bool, Reason) {
-	return s.decide(q.ErrorCode != "", q)
+	return s.decide(q.ErrorCode != "", q, false)
 }
 
 // DecideTrace samples a whole trace: an error anywhere or a slow root keeps it.
 // The root is the client query, or the first server query when there is none.
 func (s *Sampler) DecideTrace(t correlate.Trace) (bool, Reason) {
+	return s.DecideTraceParent(t, false)
+}
+
+// DecideTraceParent is DecideTrace for a trace whose application parent span
+// is sampled (parentSampled): such traces are always kept, reason "parent",
+// unless an error or slowness is the better reason.
+func (s *Sampler) DecideTraceParent(t correlate.Trace, parentSampled bool) (bool, Reason) {
 	var root pgwire.Query
 	failed := false
 	if t.Client != nil {
@@ -57,10 +66,10 @@ func (s *Sampler) DecideTrace(t correlate.Trace) (bool, Reason) {
 	for _, c := range t.Server {
 		failed = failed || c.Q.ErrorCode != ""
 	}
-	return s.decide(failed, root)
+	return s.decide(failed, root, parentSampled)
 }
 
-func (s *Sampler) decide(failed bool, root pgwire.Query) (bool, Reason) {
+func (s *Sampler) decide(failed bool, root pgwire.Query, parentSampled bool) (bool, Reason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats["seen"]++
@@ -70,6 +79,8 @@ func (s *Sampler) decide(failed bool, root pgwire.Query) (bool, Reason) {
 		r = ReasonError
 	case root.End >= root.Start && time.Duration(root.End-root.Start) >= s.slow:
 		r = ReasonSlow
+	case parentSampled:
+		r = ReasonParent
 	case s.ratio > 0 && s.rng.Float64() < s.ratio:
 		r = ReasonRatio
 	default:
