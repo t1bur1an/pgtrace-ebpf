@@ -1,0 +1,4 @@
+date: 2026-09-29T16:57:02+03:00
+cpu: AMD Ryzen 7 7700X 8-Core Processor (16 threads)
+clients: 1000 select-only simple, duration_per_run_s: 30, repeats: 3
+agent: client tracing, labels database,user,client_addr, param-sync attach
