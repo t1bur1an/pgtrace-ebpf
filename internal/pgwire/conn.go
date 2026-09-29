@@ -47,6 +47,7 @@ type Result struct {
 	Started    []Start
 	Done       []Query
 	Truncated  int         // messages cut at Options.MaxMessage
+	Resynced   bool        // a stream lost its place and was reset
 	ConnErrors []ConnError // errors not answering any query
 }
 
@@ -134,6 +135,7 @@ func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) R
 		msgs, desync := c.fe.feed(payload, int(totalLen))
 		if desync {
 			c.forget()
+			r.Resynced = true
 		}
 		for _, m := range msgs {
 			if m.cut {
@@ -152,6 +154,7 @@ func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) R
 	}
 	if desync {
 		c.forget()
+		r.Resynced = true
 	}
 	return r
 }

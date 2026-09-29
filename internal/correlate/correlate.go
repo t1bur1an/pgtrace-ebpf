@@ -496,16 +496,31 @@ func (c *Correlator) Stats() map[string]uint64 {
 // Size is the number of queries currently tracked (queued, in flight, held).
 func (c *Correlator) Size() int {
 	n := 0
+	for _, v := range c.Entries() {
+		n += v
+	}
+	return n
+}
+
+// Entries breaks Size down: queued (client queries not yet seen on a server),
+// held (completed server queries waiting for their client query), inflight
+// (server queries started, not completed), unattributed, paramsync (held
+// SET/RESET), plus the number of clients and servers tracked. Call from the
+// correlator's goroutine.
+func (c *Correlator) Entries() map[string]int {
+	e := map[string]int{"queued": 0, "held": 0, "inflight": 0, "unattributed": 0, "paramsync": 0}
 	for _, cl := range c.clients {
-		n += len(cl.queue)
+		e["queued"] += len(cl.queue)
 		for _, h := range cl.held {
-			n += len(h.children)
+			e["held"] += len(h.children)
 		}
 	}
 	for _, s := range c.servers {
-		n += len(s.attr) + len(s.unattributed) + len(s.held)
+		e["inflight"] += len(s.attr)
+		e["unattributed"] += len(s.unattributed)
+		e["paramsync"] += len(s.held)
 	}
-	return n
+	return e
 }
 
 // Event marks one pgbouncer data event (any send/recv) of process pid. It

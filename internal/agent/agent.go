@@ -92,6 +92,9 @@ func (a *Agent) Run(ctx context.Context, events <-chan any) {
 			return
 		case <-tick.C:
 			a.cor.Tick(monotonic())
+			if a.Metrics != nil {
+				a.Metrics.SetCorrelatorEntries(a.cor.Entries())
+			}
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -210,6 +213,9 @@ func (a *Agent) data(ev event.Data) {
 		}
 		for i := 0; i < r.Truncated; i++ {
 			a.Metrics.Truncation("parser")
+		}
+		if r.Resynced {
+			a.Metrics.ParserResync(map[connmap.Side]string{connmap.SideServer: "server", connmap.SideClient: "client"}[c.side])
 		}
 	}
 	for _, st := range r.Started {

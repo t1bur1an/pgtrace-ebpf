@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -56,6 +57,7 @@ type config struct {
 	sqlcommenter       bool
 	parentSampling     bool
 	attachParamSync    bool
+	pprof              bool
 }
 
 func main() {
@@ -81,6 +83,7 @@ func main() {
 	flag.DurationVar(&c.labelTTL, "metrics-label-ttl", 30*time.Minute, "client label combinations idle this long are removed")
 	flag.BoolVar(&c.sqlcommenter, "sqlcommenter", true, "read SQLCommenter comments; a traceparent makes the application span the parent of the pgbouncer span")
 	flag.BoolVar(&c.parentSampling, "sqlcommenter-parent-sampling", true, "always keep traces whose SQLCommenter parent is sampled")
+	flag.BoolVar(&c.pprof, "pprof", false, "serve Go profiling endpoints at /debug/pprof/ on -metrics-addr (diagnostics only)")
 	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -169,7 +172,15 @@ func run(c config) error {
 	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }})
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
 	if c.metricsAddr != "" {
-		srv := &http.Server{Addr: c.metricsAddr, Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{})}
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		if c.pprof {
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		}
+		srv := &http.Server{Addr: c.metricsAddr, Handler: mux}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("metrics server", "err", err)
