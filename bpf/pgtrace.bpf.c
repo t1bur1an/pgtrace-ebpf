@@ -75,11 +75,15 @@ struct sock_common {
 struct sock {
 	struct sock_common __sk_common;
 	__u16 sk_protocol;
+	__u8 sk_shutdown; // a bitfield on some kernels: read with BPF_CORE_READ_BITFIELD_PROBED
 } __attribute__((preserve_access_index));
 struct tcp_sock {
 	__u32 write_seq;
 	__u32 copied_seq;
+	__u32 rcv_nxt;
 } __attribute__((preserve_access_index));
+
+#define RCV_SHUTDOWN 1
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -186,7 +190,17 @@ static __always_inline int tcp_seq(__s32 fd, int ret, __u8 dir, __u32 *out)
 	if ((family != AF_INET && family != AF_INET6) || BPF_CORE_READ(sk, sk_protocol) != IPPROTO_TCP)
 		return 0;
 	struct tcp_sock *tp = (struct tcp_sock *)sk;
-	__u32 end = dir == D_SEND ? BPF_CORE_READ(tp, write_seq) : BPF_CORE_READ(tp, copied_seq);
+	__u32 end;
+	if (dir == D_SEND) {
+		end = BPF_CORE_READ(tp, write_seq);
+	} else {
+		end = BPF_CORE_READ(tp, copied_seq);
+		// A read that also consumed the peer's FIN advanced copied_seq by
+		// one more than the data returned.
+		__u8 shut = BPF_CORE_READ_BITFIELD_PROBED(sk, sk_shutdown);
+		if ((shut & RCV_SHUTDOWN) && end == BPF_CORE_READ(tp, rcv_nxt))
+			end -= 1;
+	}
 	*out = end - (__u32)ret;
 	return 1;
 }
