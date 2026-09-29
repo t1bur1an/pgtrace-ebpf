@@ -57,10 +57,11 @@ type conn struct {
 }
 
 type recorded struct {
-	ts    uint64
-	dir   event.Dir
-	total uint32
-	head  []byte
+	ts       uint64
+	dir      event.Dir
+	total    uint32
+	captured int // bytes the kernel copied (may be < total)
+	head     []byte
 }
 
 const recorderEvents, recorderBytes = 64, 1024
@@ -231,7 +232,7 @@ func (a *Agent) data(ev event.Data) {
 		a.count(c.side, 1)
 	}
 	if a.DumpDir != "" {
-		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
+		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, captured: len(ev.Payload), head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
 		if len(c.recent) < recorderEvents {
 			c.recent = append(c.recent, r)
 		} else {
@@ -373,7 +374,7 @@ func (a *Agent) dump(head, kind string, keys ...event.ConnKey) {
 			if r.dir == event.DirRecv {
 				dir = "recv"
 			}
-			fmt.Fprintf(&b, "%d %s total=%d captured=%d\n%s\n", r.ts, dir, r.total, len(r.head), hex.Dump(r.head))
+			fmt.Fprintf(&b, "%d %s total=%d captured=%d shown=%d\n%s\n", r.ts, dir, r.total, r.captured, len(r.head), hex.Dump(r.head))
 		}
 	}
 	name := filepath.Join(a.DumpDir, fmt.Sprintf("%s-pid%d-fd%d-%d.txt", kind, keys[0].PID, keys[0].FD, time.Now().UnixNano()))

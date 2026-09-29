@@ -179,7 +179,13 @@ func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
 			if len(p) == 0 {
 				break
 			}
-			p, s.expectSSL = p[1:], false
+			// The single-byte SSL/GSS answer ('N' no, 'S'/'G' yes). pgbouncer
+			// may send it through a syscall that isn't captured, so only
+			// consume it if that's what this byte is.
+			if p[0] == 'N' || p[0] == 'S' || p[0] == 'G' {
+				p = p[1:]
+			}
+			s.expectSSL = false
 			continue
 		}
 		if len(s.buf) == 0 && len(p) == 0 {

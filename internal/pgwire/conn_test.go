@@ -296,3 +296,22 @@ func TestInflightGroupsCapped(t *testing.T) {
 		t.Fatalf("%d groups in flight", len(c.groups))
 	}
 }
+
+// pgbouncer's 1-byte SSL answer can go out through a syscall the agent
+// doesn't capture; the next captured message must not be eaten in its place.
+func TestSSLAnswerNotCaptured(t *testing.T) {
+	c := NewClientConn()
+	ssl := sslRequest()
+	c.Feed(event.DirRecv, 1, ssl, uint32(len(ssl)))
+	st := startup("app")
+	c.Feed(event.DirRecv, 2, st, uint32(len(st)))
+	auth := cat(bAuthOK(), bParam("server_version", "17"), bReady())
+	if r := c.Feed(event.DirSend, 3, auth, uint32(len(auth))); r.Resynced {
+		t.Fatal("desync after an uncaptured SSL answer")
+	}
+	c.Feed(event.DirRecv, 4, fQuery("select 1"), uint32(len(fQuery("select 1"))))
+	be := cat(selectResult(1), bReady())
+	if r := c.Feed(event.DirSend, 5, be, uint32(len(be))); len(r.Done) != 1 || r.Resynced {
+		t.Fatalf("got %+v", r)
+	}
+}

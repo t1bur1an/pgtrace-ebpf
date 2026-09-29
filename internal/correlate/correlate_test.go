@@ -462,3 +462,32 @@ func TestParamSyncAttachDisabled(t *testing.T) {
 		t.Fatalf("disabled: %+v", r.traces)
 	}
 }
+
+func TestHeldChildWaitsForRunningQuery(t *testing.T) {
+	r := newRec()
+	c := st(C1, 10, 42)
+	r.recv(C1, 10)
+	r.c.ClientStarted(pid, C1, c)
+	set := st(S1, 11, 999)
+	r.serverStart(S1, set)
+	r.reply()
+	r.c.ServerDone(S1, setQ(set, 12))
+	q := st(S1, 13, 42) // the client's query: runs for a minute
+	r.serverStart(S1, q)
+	r.c.Tick(12 + uint64(40*time.Second))
+	if len(r.traces) != 0 {
+		t.Fatalf("parameter-sync child orphaned while its query was running: %+v", r.traces)
+	}
+	r.reply()
+	end := 13 + uint64(60*time.Second)
+	r.c.ServerDone(S1, done(q, end, 'I'))
+	r.c.Event(pid)
+	r.c.ClientDone(C1, done(c, end+1, 'I'))
+	tr := r.last(t)
+	if tr.Client == nil || len(tr.Server) != 2 || !tr.Server[0].Internal || tr.Server[0].Client != C1 {
+		t.Fatalf("got %+v", tr)
+	}
+	if st := r.c.Stats(); st["orphan"] != 0 {
+		t.Fatalf("stats %v", st)
+	}
+}

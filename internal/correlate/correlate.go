@@ -253,7 +253,7 @@ func (c *Correlator) ServerStarted(pid uint32, k event.ConnKey, st pgwire.Start)
 		cl.held[a.qid] = h
 	}
 	for _, sq := range sync {
-		sq.Correlation, sq.Internal = Exact, true
+		sq.Correlation, sq.Internal, sq.Client = Exact, true, a.client
 		h.children = append(h.children, sq)
 		c.stats["internal"].Add(1)
 	}
@@ -476,8 +476,19 @@ func (c *Correlator) Tick(now uint64) {
 			s.held, s.heldSince = nil, 0
 		}
 	}
-	for _, cl := range c.clients {
+	// A client query with a server query still running isn't lost, only
+	// slow: its earlier children (e.g. parameter sync) keep waiting.
+	running := map[attribution]bool{}
+	for _, s := range c.servers {
+		for _, a := range s.attr {
+			running[attribution{client: a.client, qid: a.qid}] = true
+		}
+	}
+	for ck, cl := range c.clients {
 		for id, h := range cl.held {
+			if running[attribution{client: ck, qid: id}] {
+				continue
+			}
 			if now > h.since && now-h.since > c.hold {
 				c.orphan(h.children)
 				delete(cl.held, id)
