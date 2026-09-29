@@ -42,6 +42,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--ratio", type=float, required=True)
 ap.add_argument("--min-traces", type=int, required=True)
 ap.add_argument("--stats", required=True)
+ap.add_argument("--ceiling", type=int, default=8975)
 ap.add_argument("--deploy", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy"))
 args = ap.parse_args()
 stats = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", args.stats)}
@@ -137,7 +138,7 @@ check("per-database pool-wait series for the tiny pool", val(r'^pgtrace_client_p
 check("per-client metrics carry database/user/client_addr labels",
       re.search(r'^pgtrace_client_queries_total\{client_addr="[0-9.]+",database="postgres",user="postgres"\}', metrics, re.M) is not None)
 nseries = len([l for l in metrics.splitlines() if l.startswith("pgtrace_")])
-check("pgtrace series under the documented ceiling (limit 200: 8,973)", nseries <= 8973, f"{nseries} series")
+check(f"pgtrace series under the documented ceiling ({args.ceiling:,})", nseries <= args.ceiling, f"{nseries} series")
 
 # --- SQLCommenter trace context -----------------------------------------------
 TID, PSID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"

@@ -1,4 +1,4 @@
-.PHONY: generate build test e2e
+.PHONY: generate build test e2e e2e-tls
 
 generate:
 	go generate ./...
@@ -13,3 +13,6 @@ test:
 
 e2e:
 	./scripts/e2e.sh
+
+e2e-tls:
+	./scripts/e2e_tls.sh

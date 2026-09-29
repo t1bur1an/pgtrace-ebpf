@@ -117,9 +117,16 @@ int BPF_PROG(exit_sendto, int fd, void *buff, __u64 len, unsigned int flags, voi
 	return 0;
 }
 
+// A peek leaves the bytes in the socket: they arrive again with the next
+// read. pgbouncer peeks the first byte of a client connection when TLS is
+// configured, to tell a direct TLS handshake from a startup packet.
+#define MSG_PEEK 2
+
 SEC("fexit/__sys_recvfrom")
 int BPF_PROG(exit_recvfrom, int fd, void *ubuf, __u64 size, unsigned int flags, void *addr, int *addr_len, int ret)
 {
+	if (flags & MSG_PEEK)
+		return 0;
 	emit_data(fd, ubuf, ret, D_RECV);
 	return 0;
 }
