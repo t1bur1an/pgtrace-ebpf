@@ -134,3 +134,55 @@ func mustDecode(t *testing.T, raw []byte) any {
 	}
 	return v
 }
+
+func TestDecodeTLSData(t *testing.T) {
+	raw := append(header(0, 0, -1, 5, 5), "hello"...)
+	binary.LittleEndian.PutUint64(raw[32:], 0xdeadbeef)
+	binary.LittleEndian.PutUint32(raw[52:], flagTLS)
+	got, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := event.Data{TS: 777, Key: event.ConnKey{PID: 42, FD: -1}, Dir: event.DirSend, TotalLen: 5,
+		Payload: []byte("hello"), TLS: true, Session: 0xdeadbeef}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v", got)
+	}
+	// With a known fd the session is not reported.
+	raw = append(header(0, 1, 7, 2, 2), "ok"...)
+	binary.LittleEndian.PutUint64(raw[32:], 0xdeadbeef)
+	binary.LittleEndian.PutUint32(raw[52:], flagTLS)
+	got, _ = decode(raw)
+	if d := got.(event.Data); !d.TLS || d.Session != 0 || d.Key.FD != 7 || d.HasSeq {
+		t.Fatalf("got %+v", d)
+	}
+}
+
+func TestDecodeTLSFD(t *testing.T) {
+	raw := header(4, 0, 9, 0, 0)
+	binary.LittleEndian.PutUint64(raw[32:], 0xabc)
+	got, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (event.TLSFD{TS: 777, Key: event.ConnKey{PID: 42, FD: 9}, Session: 0xabc}); got != want {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDecodeTLSInfo(t *testing.T) {
+	raw := append(header(5, 0, 9, 0, 7), "TLSv1.3"...)
+	binary.LittleEndian.PutUint64(raw[32:], 0xabc)
+	got, _ := decode(raw)
+	if want := (event.TLSAttr{TS: 777, Key: event.ConnKey{PID: 42, FD: 9}, Session: 0xabc, Version: "TLSv1.3"}); got != want {
+		t.Fatalf("got %+v", got)
+	}
+	raw = append(header(5, 1, 9, 0, 22), "TLS_AES_256_GCM_SHA384"...)
+	got, _ = decode(raw)
+	if a := got.(event.TLSAttr); a.Cipher != "TLS_AES_256_GCM_SHA384" || a.Version != "" {
+		t.Fatalf("got %+v", a)
+	}
+	if _, err := decode(header(5, 0, 9, 0, 40)); err == nil {
+		t.Fatal("expected error for cap_len beyond the record")
+	}
+}
