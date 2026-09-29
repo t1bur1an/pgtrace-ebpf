@@ -58,6 +58,7 @@ type config struct {
 	attachParamSync    bool
 	pprof              bool
 	debugDumpDir       string
+	tlsCapture         bool
 	exportWorkers      int
 	exportBatch        int
 	exportQueue        int
@@ -94,6 +95,7 @@ func main() {
 	flag.StringVar(&c.debugDumpDir, "debug-dump-dir", "", "diagnostics: keep recent events per connection and dump them here when a server query is orphaned")
 	flag.BoolVar(&c.pprof, "pprof", false, "serve Go profiling endpoints at /debug/pprof/ on -metrics-addr (diagnostics only)")
 	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
+	flag.BoolVar(&c.tlsCapture, "tls-capture", false, "capture plaintext of pgbouncer's TLS connections with uprobes on its libssl (costs pgbouncer CPU per TLS query)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -158,7 +160,7 @@ func run(c config) error {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
+	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL, TLS: c.tlsCapture})
 	created, exported, failed, dropped := met.ExportHooks()
 	exp, err := export.New(export.Config{
 		Endpoint: c.endpoint, Service: c.service,
@@ -179,7 +181,7 @@ func run(c config) error {
 	}()
 
 	capt, err := capture.Start(ctx, capture.Config{Comm: c.comm, ProcRoot: c.procRoot, RescanEvery: 5 * time.Second,
-		BPFStats: c.bpfStats, CaptureBytes: c.captureBytes})
+		BPFStats: c.bpfStats, CaptureBytes: c.captureBytes, TLS: c.tlsCapture})
 	if err != nil {
 		return fmt.Errorf("start capture (needs CAP_BPF/CAP_PERFMON or privileged): %w", err)
 	}
@@ -187,6 +189,9 @@ func run(c config) error {
 
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
 	met.RegisterRecursionMisses(capt.RecursionMisses)
+	if c.tlsCapture {
+		met.RegisterTLS(capt.TLSProcesses, capt.TLSFallbackAttached)
+	}
 	if c.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -227,6 +232,9 @@ func run(c config) error {
 	})
 	ag.Filter = capt
 	ag.Metrics = met
+	if c.tlsCapture {
+		ag.Fallback = capt
+	}
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
 	ag.SetAttachParamSync(c.attachParamSync)
@@ -234,7 +242,7 @@ func run(c config) error {
 	slog.Info("attached", "version", version, "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
-		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync)
+		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync, "tls_capture", c.tlsCapture)
 
 	go func() {
 		t := time.NewTicker(c.statsEvery)
