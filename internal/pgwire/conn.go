@@ -133,6 +133,10 @@ func NewConnWith(client bool, o Options) *Conn {
 // packet was seen.
 func (c *Conn) Params() map[string]string { return c.params }
 
+// TLS reports whether the connection negotiated TLS (the server answered an
+// SSLRequest with 'S'). Its later bytes are only seen with TLS capture.
+func (c *Conn) TLS() bool { return c.be.tls }
+
 // Feed consumes one captured chunk.
 func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) Result {
 	var r Result
