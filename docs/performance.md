@@ -20,15 +20,45 @@ describe that mode.
 | Latency added per query (same workload) | **+10 µs** at 8 clients (75 → 85 µs), +2 µs at 1 client |
 | Where it goes | −3.7 %: fexit trampolines on every `sendto`/`recvfrom` on the host (paid even by pgbench and postgres); −7.7 %: capturing pgbouncer's server traffic + agent; −1 %: optional BPF run-time stats |
 | In-kernel cost | ≈ 10 BPF program runs per query host-wide, **≈ 95 ns per run** (with stats accounting on) |
-| Agent CPU / memory at ≈ 90 k queries/s | client + server: **0.7 core**, **70 MiB** at sample ratio 0.1; **2.1 cores**, 310 MiB exporting every trace (2 spans each). Server-only: 0.3–0.4 core, 60–70 MiB |
+| Agent CPU / memory, 1,000 clients, ≈ 60–66 k client queries/s | **0.51 core, 99 MiB** at sample ratio 0.1; **0.68 core, 145 MiB** exporting every trace (120 k spans/s, all delivered). See [Export pipeline](#export-pipeline) |
 | Highest rate tested | 93 k queries/s through a single pgbouncer (pgbouncer + postgres + pgbench on one 8-core box were the limit, not the agent) |
-| Loss | **0 kernel ringbuf drops** in every run; **4 119 410 / 4 119 410** spans the agent kept arrived in VictoriaTraces |
-| Agent userspace capacity (projected from benchmarks) | ≈ 650 k client queries/s/core through parse + correlate; ≈ 400 k exported spans/s/core |
+| Loss | **0 kernel ringbuf drops** in every run; every span the agent kept arrived in VictoriaTraces, including 120 k spans/s at 100 % sampling; any export loss is counted in `pgtrace_export_spans_total{stage="dropped"}` |
+| Agent userspace capacity | event loop (parse + correlate) is single-threaded: 0.43 core at 60 k client queries/s; span encoding runs on 4 export workers at ≈ 1.1 µs per two-span trace |
 
 For real workloads where queries take milliseconds rather than tens of
 microseconds, the relative cost is proportionally smaller: the absolute cost is
 roughly **1 µs of kernel CPU and 3 µs of agent CPU per query** (see
 [Cost model](#cost-model)).
+
+## Export pipeline
+
+Measured 2026-09-29 with `scripts/perf_sampling.sh`: 1,000 pgbench clients,
+select-only, pool 20, 3 × 30 s. The agent ran with client tracing, per-client
+labels and param-sync attach. Raw data:
+`docs/perf-results/sampling-own-exporter-v2/`. The history is in
+`docs/bottlenecks.md`: the OpenTelemetry SDK exporter capped at 91 k spans/s
+and silently dropped 23 %.
+
+| | agent off | 10 % sampling | 100 % sampling |
+|---|---:|---:|---:|
+| TPS | 84 464 | 67 403 (−20.2 %) | 61 254 (−27.5 %) |
+| agent CPU / RSS | – | 0.51 core / 99 MiB | 0.68 core / 145 MiB |
+| spans delivered per second | – | 13 188 (all) | 120 038 (all) |
+| export queue drops, failed batches | – | 0, 0 | 0, 0 |
+| GC share of agent CPU | – | | 1.6 % |
+| VictoriaTraces CPU | | 16 % | 118 % |
+
+Kept traces go to a bounded queue (`-export-queue`, 65,536 traces). 4 workers
+(`-export-workers`) encode OTLP protobuf directly and POST their own batches
+(`-export-batch` 8,192 spans, `-export-interval` 1 s). Encoding a two-span
+trace takes about 1.1 µs with 2 allocations (`BenchmarkEncodeTrace`).
+
+The TPS cost at 100 % comes from capture and parsing, plus VictoriaTraces
+ingesting 120 k spans/s on the same 16 threads. The export itself isn't a
+bottleneck. A 90-minute soak at 10 % (`docs/soak-results/export-20260929-1704/`)
+delivered 304,031 of 304,031 spans, with RSS flat at 141–143 MiB. That run was
+before the queue-slot and `GOGC` fixes, which roughly halved RSS in the
+benchmark above.
 
 ## Client tracing and correlation
 
@@ -282,7 +312,9 @@ CPU-bound results above put the agent's cost around 0.03 cores. Raw data:
 
 Compared with ratio 0.1 at the same client count (79 069 / 76 177 TPS),
 exporting everything costs a further 6–7 % TPS and about 0.75 core, almost all
-of it in the OpenTelemetry SDK and the OTLP/HTTP protobuf encoding. Over the
+of it in the OpenTelemetry SDK and the OTLP/HTTP protobuf encoding. (Measured
+with the SDK exporter, which has since been replaced; see
+[Export pipeline](#export-pipeline).) Over the
 whole matrix, VictoriaTraces stored **exactly** the 4 119 410 spans the agent
 reported keeping.
 
@@ -295,7 +327,8 @@ reported keeping.
 | `ConnSimpleQuery` | parse one simple-protocol round trip (Q → T, D, C, Z) | 348 | 15 |
 | `ConnExtendedQuery` | parse Parse/Bind/Describe/Execute/Sync + responses | 666 | 21 |
 | `Pipeline` | connmap lookup + parse + sample (ratio 0.1) per query | 477 | 15 |
-| `Export` | build one span and hand it to the batch processor | 2 525 | 17 |
+| `Export` | build one span and hand it to the batch processor (old SDK exporter) | 2 525 | 17 |
+| `EncodeTrace` | encode a client + server span (2 spans) straight to OTLP protobuf (current exporter) | 1 158 | 2 |
 
 These exclude ringbuf reading, decoding and network export. Measured
 end-to-end, the agent used 0.28 core at 93 k queries/s, about **3 µs of agent
