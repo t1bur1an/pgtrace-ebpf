@@ -80,6 +80,11 @@ type portal struct {
 	bind []byte // Bind body after the statement name
 }
 
+// maxInflightGroups bounds unanswered query groups per connection. Real
+// clients pipeline a handful; more means the replies are not being seen,
+// and the oldest are dropped so memory stays bounded.
+const maxInflightGroups = 1024
+
 // Conn tracks one connection. It is not safe for concurrent use.
 type Conn struct {
 	feDir   event.Dir // direction carrying frontend (client→server) messages
@@ -189,7 +194,7 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 		c.open = nil
 		clear(c.parsed)
 		q := &Query{Start: ts, SQL: sql, Protocol: "simple", Truncated: m.truncated, Sig: hash(sql), SQLKnown: true, PerExecution: true}
-		c.groups = append(c.groups, &group{simple: true, queries: []*Query{q}})
+		c.addGroup(&group{simple: true, queries: []*Query{q}}, r)
 		c.start(q, r)
 	case 'P':
 		name, rest := cstring(m.body)
@@ -209,7 +214,7 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 		}
 		if c.open == nil {
 			c.open = &group{}
-			c.groups = append(c.groups, c.open)
+			c.addGroup(c.open, r)
 		}
 		q := &Query{
 			Start: ts, SQL: sql, Protocol: "extended", Truncated: c.stmtTr[p.stmt],
@@ -221,7 +226,7 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 	case 'S':
 		clear(c.parsed)
 		if c.open == nil {
-			c.groups = append(c.groups, &group{})
+			c.addGroup(&group{}, r)
 		}
 		c.open = nil
 	case 'C':
@@ -234,6 +239,15 @@ func (c *Conn) frontend(ts uint64, m msg, r *Result) {
 				delete(c.portals, name)
 			}
 		}
+	}
+}
+
+// addGroup queues a group, dropping the oldest beyond maxInflightGroups.
+func (c *Conn) addGroup(g *group, r *Result) {
+	c.groups = append(c.groups, g)
+	if n := len(c.groups) - maxInflightGroups; n > 0 {
+		c.groups = append([]*group(nil), c.groups[n:]...)
+		r.Resynced = true
 	}
 }
 

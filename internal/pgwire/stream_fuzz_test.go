@@ -42,6 +42,9 @@ func genStream(r *rand.Rand, frontend bool, keep int) ([]byte, []wantMsg) {
 		if n < 0 {
 			n = 0
 		}
+		if lo, hi := lengthBounds(frontend, typ); n+4 < lo || n+4 > hi {
+			n = lo - 4 + r.IntN(min(hi, lo+64)-lo+1)
+		}
 		body := make([]byte, n)
 		for j := range body {
 			body[j] = byte(r.IntN(256))
@@ -92,6 +95,43 @@ func TestStreamRandomChunking(t *testing.T) {
 		}
 		if len(s.buf) != 0 || s.discard != 0 {
 			t.Fatalf("seed %d: leftover buf %d discard %d", seed, len(s.buf), s.discard)
+		}
+	}
+}
+
+func TestImplausibleLengthIsDesync(t *testing.T) {
+	cases := []struct {
+		frontend bool
+		typ      byte
+		length   uint32
+	}{
+		{false, 'Z', 777_668_160}, // ReadyForQuery is always 5 bytes
+		{false, 'Z', 6},
+		{false, '2', 5},        // BindComplete is always 4
+		{false, 'C', 5 << 20},  // command tags are short
+		{false, 'E', 50 << 20}, // error messages are not tens of MB
+		{true, 'S', 8},         // Sync is always 4
+		{true, 'E', 10 << 20},  // Execute carries only a portal name
+	}
+	for _, c := range cases {
+		s := stream{frontend: c.frontend, synced: true, keep: DefaultMaxMessage}
+		hdr := []byte{c.typ, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(hdr[1:], c.length)
+		p := append(hdr, make([]byte, 20)...)
+		if _, desync := s.feed(p, len(p)); !desync {
+			t.Errorf("%q length %d accepted", c.typ, c.length)
+		}
+	}
+	// Large lengths stay legal where the protocol allows them.
+	for _, c := range []struct {
+		frontend bool
+		typ      byte
+	}{{false, 'D'}, {true, 'Q'}, {true, 'P'}, {true, 'B'}, {false, 'd'}} {
+		s := stream{frontend: c.frontend, synced: true, keep: DefaultMaxMessage}
+		hdr := []byte{c.typ, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(hdr[1:], 500<<20)
+		if _, desync := s.feed(hdr, 5); desync {
+			t.Errorf("%q with a 500 MB length rejected", c.typ)
 		}
 	}
 }

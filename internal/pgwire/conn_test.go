@@ -286,3 +286,13 @@ func TestHugeMessagesAreNotBuffered(t *testing.T) {
 		t.Fatalf("after: %+v", got)
 	}
 }
+
+func TestInflightGroupsCapped(t *testing.T) {
+	c := NewClientConn()
+	for i := 0; i < maxInflightGroups+500; i++ {
+		c.Feed(event.DirRecv, uint64(i), fQuery("select 1"), uint32(len(fQuery("select 1"))))
+	}
+	if len(c.groups) > maxInflightGroups {
+		t.Fatalf("%d groups in flight", len(c.groups))
+	}
+}

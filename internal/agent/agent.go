@@ -75,7 +75,7 @@ type Agent struct {
 	// connection are kept, and the first orphaned query of a server
 	// connection dumps both connections' history there (diagnostics).
 	DumpDir string
-	dumps   map[event.ConnKey]bool
+	dumps   map[string]int
 
 	cm     *connmap.Map
 	sink   Sink
@@ -256,6 +256,9 @@ func (a *Agent) data(ev event.Data) {
 			a.Metrics.ParserResync(map[connmap.Side]string{connmap.SideServer: "server", connmap.SideClient: "client"}[c.side])
 		}
 	}
+	if r.Resynced && a.DumpDir != "" {
+		a.dump(fmt.Sprintf("resync: %v (%s) parser lost its place", ev.Key, c.side), "resync", ev.Key)
+	}
 	for _, st := range r.Started {
 		if c.side == connmap.SideServer {
 			a.cor.ServerStarted(pid, ev.Key, st)
@@ -333,20 +336,30 @@ func (a *Agent) SetAttachParamSync(on bool) { a.cor.AttachParamSync = on }
 func (a *Agent) CorrelationStats() map[string]uint64 { return a.cor.Stats() }
 
 // dumpOrphan writes the flight recorder of an orphaned query's server and
-// client connections, once per server connection, at most 20 files.
+// client connections, once per server connection.
 func (a *Agent) dumpOrphan(sq correlate.ServerQuery) {
+	head := fmt.Sprintf("orphan: server %v query q%d %q start=%d end=%d tx=%q attributed to client %v (%s)\n\n%s",
+		sq.Key, sq.Q.ID, trunc(sq.Q.SQL, 80), sq.Q.Start, sq.Q.End, sq.Q.TxStatus, sq.Client, sq.Correlation,
+		a.cor.Debug(sq.Key, sq.Client))
+	a.dump(head, "orphan", sq.Key, sq.Client)
+}
+
+// dump writes the recent events and parser state of the given connections,
+// once per first connection and kind, at most 20 files per kind.
+func (a *Agent) dump(head, kind string, keys ...event.ConnKey) {
 	if a.dumps == nil {
-		a.dumps = map[event.ConnKey]bool{}
+		a.dumps = map[string]int{}
 	}
-	if a.dumps[sq.Key] || len(a.dumps) >= 20 {
+	id := fmt.Sprint(kind, keys[0])
+	if a.dumps[id] > 0 || a.dumps[kind] >= 20 {
 		return
 	}
-	a.dumps[sq.Key] = true
+	a.dumps[id]++
+	a.dumps[kind]++
 	var b strings.Builder
-	fmt.Fprintf(&b, "orphan: server %v query q%d %q start=%d end=%d tx=%q attributed to client %v (%s)\n\n",
-		sq.Key, sq.Q.ID, trunc(sq.Q.SQL, 80), sq.Q.Start, sq.Q.End, sq.Q.TxStatus, sq.Client, sq.Correlation)
-	b.WriteString(a.cor.Debug(sq.Key, sq.Client))
-	for _, k := range []event.ConnKey{sq.Key, sq.Client} {
+	b.WriteString(head)
+	b.WriteString("\n")
+	for _, k := range keys {
 		c := a.conns[k]
 		if c == nil {
 			fmt.Fprintf(&b, "\n== %v: no parser state\n", k)
@@ -363,12 +376,12 @@ func (a *Agent) dumpOrphan(sq correlate.ServerQuery) {
 			fmt.Fprintf(&b, "%d %s total=%d captured=%d\n%s\n", r.ts, dir, r.total, len(r.head), hex.Dump(r.head))
 		}
 	}
-	name := filepath.Join(a.DumpDir, fmt.Sprintf("orphan-pid%d-fd%d-%d.txt", sq.Key.PID, sq.Key.FD, sq.Q.End))
+	name := filepath.Join(a.DumpDir, fmt.Sprintf("%s-pid%d-fd%d-%d.txt", kind, keys[0].PID, keys[0].FD, time.Now().UnixNano()))
 	if err := os.WriteFile(name, []byte(b.String()), 0o644); err != nil {
 		slog.Warn("flight recorder dump", "err", err)
 		return
 	}
-	slog.Warn("orphaned server query: flight recorder dumped", "file", name)
+	slog.Warn("flight recorder dumped", "kind", kind, "file", name)
 }
 
 func trunc(s string, n int) string {

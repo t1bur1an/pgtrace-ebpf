@@ -1,0 +1,140 @@
+ Container pgtrace-loadgen-run-043ab4d75075 Creating 
+ Container pgtrace-loadgen-run-043ab4d75075 Created 
+pgbench (17.11 (Debian 17.11-1.pgdg13+2))
+progress: 60.0 s, 19.7 tps, lat 20.199 ms stddev 137.351, 0 failed, lag 0.076 ms, 1 retried, 2 retries
+progress: 120.0 s, 21.4 tps, lat 29.201 ms stddev 157.150, 0 failed, lag 0.454 ms, 3 retried, 8 retries
+progress: 180.0 s, 20.2 tps, lat 24.355 ms stddev 56.236, 0 failed, lag 0.606 ms, 1 retried, 1 retries
+progress: 240.0 s, 19.8 tps, lat 24.311 ms stddev 94.118, 0 failed, lag 0.142 ms, 2 retried, 2 retries
+progress: 300.0 s, 20.8 tps, lat 47.929 ms stddev 360.904, 0 failed, lag 5.073 ms, 6 retried, 11 retries
+progress: 360.0 s, 20.5 tps, lat 80.156 ms stddev 456.198, 0 failed, lag 48.341 ms, 2 retried, 7 retries
+progress: 420.0 s, 19.9 tps, lat 66.803 ms stddev 471.217, 0 failed, lag 30.535 ms, 2 retried, 10 retries
+progress: 480.0 s, 19.7 tps, lat 23.904 ms stddev 47.538, 0 failed, lag 0.229 ms, 1 retried, 1 retries
+progress: 540.0 s, 20.6 tps, lat 20.417 ms stddev 38.349, 0 failed, lag 0.184 ms, 0 retried, 0 retries
+progress: 600.0 s, 19.2 tps, lat 21.491 ms stddev 50.405, 0 failed, lag 0.266 ms, 0 retried, 0 retries
+progress: 660.0 s, 19.6 tps, lat 20.338 ms stddev 32.874, 0 failed, lag 0.142 ms, 0 retried, 0 retries
+progress: 720.0 s, 18.7 tps, lat 20.767 ms stddev 72.239, 0 failed, lag 0.349 ms, 2 retried, 3 retries
+progress: 780.0 s, 19.9 tps, lat 24.837 ms stddev 39.567, 0 failed, lag 0.230 ms, 0 retried, 0 retries
+progress: 840.0 s, 20.3 tps, lat 136.983 ms stddev 642.222, 0 failed, lag 84.654 ms, 6 retried, 11 retries
+progress: 900.0 s, 19.8 tps, lat 30.162 ms stddev 167.562, 0 failed, lag 0.210 ms, 4 retried, 5 retries
+progress: 960.0 s, 20.1 tps, lat 18.993 ms stddev 59.805, 0 failed, lag 0.177 ms, 0 retried, 0 retries
+progress: 1020.0 s, 19.8 tps, lat 268.039 ms stddev 1127.650, 0 failed, lag 233.879 ms, 1 retried, 1 retries
+progress: 1080.0 s, 20.2 tps, lat 1119.435 ms stddev 3341.278, 0 failed, lag 1034.307 ms, 8 retried, 25 retries
+progress: 1140.0 s, 18.9 tps, lat 139.462 ms stddev 792.134, 0 failed, lag 92.147 ms, 2 retried, 9 retries
+progress: 1200.0 s, 20.0 tps, lat 59.251 ms stddev 351.548, 0 failed, lag 24.438 ms, 4 retried, 11 retries
+progress: 1260.0 s, 20.4 tps, lat 23.215 ms stddev 44.676, 0 failed, lag 0.224 ms, 1 retried, 1 retries
+progress: 1320.0 s, 20.4 tps, lat 24.420 ms stddev 41.582, 0 failed, lag 0.249 ms, 0 retried, 0 retries
+progress: 1380.0 s, 19.5 tps, lat 32.571 ms stddev 169.107, 0 failed, lag 0.878 ms, 2 retried, 4 retries
+progress: 1440.0 s, 20.5 tps, lat 20.712 ms stddev 32.388, 0 failed, lag 0.241 ms, 0 retried, 0 retries
+progress: 1500.0 s, 20.5 tps, lat 23.401 ms stddev 40.344, 0 failed, lag 0.521 ms, 0 retried, 0 retries
+progress: 1560.0 s, 20.5 tps, lat 21.814 ms stddev 34.834, 0 failed, lag 0.369 ms, 0 retried, 0 retries
+progress: 1620.0 s, 19.3 tps, lat 29.904 ms stddev 210.524, 0 failed, lag 0.557 ms, 2 retried, 8 retries
+progress: 1680.0 s, 20.7 tps, lat 25.013 ms stddev 101.274, 0 failed, lag 0.132 ms, 1 retried, 2 retries
+progress: 1740.0 s, 19.7 tps, lat 26.858 ms stddev 114.023, 0 failed, lag 0.292 ms, 3 retried, 5 retries
+transaction type: multiple scripts
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 4
+maximum number of tries: 20
+duration: 1800 s
+number of transactions actually processed: 36090
+number of failed transactions: 0 (0.000%)
+number of serialization failures: 0 (0.000%)
+number of deadlock failures: 0 (0.000%)
+number of transactions retried: 54 (0.150%)
+total number of retries: 127
+latency average = 81.706 ms
+latency stddev = 721.473 ms
+rate limit schedule lag: avg 52.028 (max 15180.324) ms
+initial connection time = 8.219 ms
+tps = 20.047775 (without initial connection time)
+SQL script 1: /soak/gen/big_insert_0.sql
+ - weight: 6 (targets 6.0% of total)
+ - 2247 transactions (6.2% of total, tps = 1.248195)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 66.333 ms
+ - latency stddev = 691.947 ms
+SQL script 2: /soak/gen/big_insert_1.sql
+ - weight: 6 (targets 6.0% of total)
+ - 2159 transactions (6.0% of total, tps = 1.199311)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 87.592 ms
+ - latency stddev = 686.913 ms
+SQL script 3: /soak/gen/big_insert_2.sql
+ - weight: 6 (targets 6.0% of total)
+ - 2142 transactions (5.9% of total, tps = 1.189868)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 71.405 ms
+ - latency stddev = 633.423 ms
+SQL script 4: /soak/gen/big_insert_3.sql
+ - weight: 6 (targets 6.0% of total)
+ - 2204 transactions (6.1% of total, tps = 1.224309)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 58.326 ms
+ - latency stddev = 529.506 ms
+SQL script 5: /soak/gen/big_replace_0.sql
+ - weight: 8 (targets 8.0% of total)
+ - 2856 transactions (7.9% of total, tps = 1.586491)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 45.320 ms
+ - latency stddev = 588.315 ms
+SQL script 6: /soak/gen/big_replace_1.sql
+ - weight: 8 (targets 8.0% of total)
+ - 2896 transactions (8.0% of total, tps = 1.608710)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 47.307 ms
+ - latency stddev = 571.639 ms
+SQL script 7: /soak/gen/big_replace_2.sql
+ - weight: 8 (targets 8.0% of total)
+ - 2987 transactions (8.3% of total, tps = 1.659260)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 1 (0.033%)
+ - total number of retries: 1
+ - latency average = 79.207 ms
+ - latency stddev = 794.755 ms
+SQL script 8: /soak/gen/big_delete.sql
+ - weight: 22 (targets 22.0% of total)
+ - 7771 transactions (21.5% of total, tps = 4.316743)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 43 (0.553%)
+ - total number of retries: 110
+ - latency average = 93.322 ms
+ - latency stddev = 894.372 ms
+SQL script 9: /soak/gen/big_txn.sql
+ - weight: 30 (targets 30.0% of total)
+ - 10828 transactions (30.0% of total, tps = 6.014888)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 10 (0.092%)
+ - total number of retries: 16
+ - latency average = 101.670 ms
+ - latency stddev = 690.423 ms

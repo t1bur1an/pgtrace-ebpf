@@ -1,0 +1,50 @@
+ Container pgtrace-loadgen-run-423198b177d9 Creating 
+ Container pgtrace-loadgen-run-423198b177d9 Created 
+pgbench (17.11 (Debian 17.11-1.pgdg13+2))
+progress: 60.0 s, 20.2 tps, lat 6.527 ms stddev 5.931, 0 failed, lag 2.640 ms, 0 retried, 0 retries
+progress: 120.0 s, 20.2 tps, lat 6.708 ms stddev 8.066, 0 failed, lag 2.728 ms, 0 retried, 0 retries
+progress: 180.0 s, 19.9 tps, lat 6.602 ms stddev 7.787, 0 failed, lag 2.648 ms, 0 retried, 0 retries
+progress: 240.0 s, 19.9 tps, lat 6.407 ms stddev 7.005, 0 failed, lag 2.549 ms, 0 retried, 0 retries
+progress: 300.0 s, 20.1 tps, lat 6.360 ms stddev 6.391, 0 failed, lag 2.594 ms, 0 retried, 0 retries
+progress: 360.0 s, 20.5 tps, lat 8.043 ms stddev 15.856, 0 failed, lag 3.128 ms, 0 retried, 0 retries
+progress: 420.0 s, 19.7 tps, lat 6.716 ms stddev 9.645, 0 failed, lag 2.666 ms, 0 retried, 0 retries
+progress: 480.0 s, 20.6 tps, lat 6.876 ms stddev 10.755, 0 failed, lag 2.680 ms, 0 retried, 0 retries
+progress: 540.0 s, 19.3 tps, lat 7.034 ms stddev 10.082, 0 failed, lag 2.559 ms, 0 retried, 0 retries
+progress: 600.0 s, 19.9 tps, lat 8.394 ms stddev 58.362, 0 failed, lag 2.650 ms, 0 retried, 0 retries
+progress: 660.0 s, 20.4 tps, lat 6.851 ms stddev 9.739, 0 failed, lag 2.759 ms, 0 retried, 0 retries
+progress: 720.0 s, 19.8 tps, lat 6.753 ms stddev 10.180, 0 failed, lag 2.577 ms, 0 retried, 0 retries
+progress: 780.0 s, 20.1 tps, lat 8.935 ms stddev 44.543, 0 failed, lag 2.963 ms, 0 retried, 0 retries
+progress: 840.0 s, 20.5 tps, lat 8.924 ms stddev 66.641, 0 failed, lag 2.878 ms, 0 retried, 0 retries
+progress: 900.0 s, 19.7 tps, lat 7.796 ms stddev 24.705, 0 failed, lag 2.606 ms, 0 retried, 0 retries
+progress: 960.0 s, 19.2 tps, lat 7.025 ms stddev 12.488, 0 failed, lag 2.783 ms, 0 retried, 0 retries
+progress: 1020.0 s, 20.3 tps, lat 6.919 ms stddev 9.922, 0 failed, lag 2.622 ms, 0 retried, 0 retries
+progress: 1080.0 s, 19.4 tps, lat 9.731 ms stddev 77.332, 0 failed, lag 2.777 ms, 0 retried, 0 retries
+progress: 1140.0 s, 21.2 tps, lat 7.318 ms stddev 12.115, 0 failed, lag 2.865 ms, 0 retried, 0 retries
+progress: 1200.0 s, 19.7 tps, lat 7.576 ms stddev 12.484, 0 failed, lag 2.777 ms, 0 retried, 0 retries
+progress: 1260.0 s, 20.3 tps, lat 10.407 ms stddev 80.048, 0 failed, lag 3.073 ms, 0 retried, 0 retries
+progress: 1320.0 s, 20.3 tps, lat 6.979 ms stddev 10.593, 0 failed, lag 2.758 ms, 0 retried, 0 retries
+progress: 1380.0 s, 19.3 tps, lat 6.669 ms stddev 8.496, 0 failed, lag 2.647 ms, 0 retried, 0 retries
+progress: 1440.0 s, 20.3 tps, lat 7.123 ms stddev 10.652, 0 failed, lag 2.772 ms, 0 retried, 0 retries
+progress: 1500.0 s, 20.7 tps, lat 7.161 ms stddev 10.436, 0 failed, lag 2.701 ms, 0 retried, 0 retries
+progress: 1560.0 s, 20.3 tps, lat 7.497 ms stddev 12.473, 0 failed, lag 2.800 ms, 0 retried, 0 retries
+progress: 1620.0 s, 20.3 tps, lat 6.410 ms stddev 6.912, 0 failed, lag 2.606 ms, 0 retried, 0 retries
+progress: 1680.0 s, 20.1 tps, lat 7.109 ms stddev 11.240, 0 failed, lag 2.701 ms, 0 retried, 0 retries
+progress: 1740.0 s, 20.4 tps, lat 7.420 ms stddev 12.500, 0 failed, lag 2.700 ms, 0 retried, 0 retries
+transaction type: /soak/gen/churn.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 20
+duration: 1800 s
+number of transactions actually processed: 36171
+number of failed transactions: 0 (0.000%)
+number of serialization failures: 0 (0.000%)
+number of deadlock failures: 0 (0.000%)
+number of transactions retried: 0 (0.000%)
+total number of retries: 0
+latency average = 7.406 ms
+latency stddev = 29.097 ms
+rate limit schedule lag: avg 2.737 (max 144.588) ms
+average connection time = 2.523 ms
+tps = 20.095211 (including reconnection times)

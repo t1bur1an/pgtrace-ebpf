@@ -1,0 +1,10 @@
+go_memstats_heap_inuse_bytes 1.4925824e+07
+pgtrace_correlation_total{result="exact"} 562592
+pgtrace_correlation_total{result="inferred"} 3
+pgtrace_correlation_total{result="internal"} 501
+pgtrace_correlation_total{result="none"} 109
+pgtrace_correlator_entries{kind="held"} 0
+pgtrace_correlator_entries{kind="inflight"} 5
+pgtrace_correlator_entries{kind="paramsync"} 0
+pgtrace_correlator_entries{kind="queued"} 0
+pgtrace_correlator_entries{kind="unattributed"} 0

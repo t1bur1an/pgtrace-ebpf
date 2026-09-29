@@ -27,6 +27,45 @@ var (
 	backendBody  = typeSet("CEZ")
 )
 
+// lengthBounds returns the smallest and largest valid length field (which
+// counts itself, not the type byte) of a message type in one direction.
+// Many messages have fixed or small sizes; checking them turns a misaligned
+// read (a "header" taken from payload bytes) into a detected desync instead
+// of skipping hundreds of megabytes.
+func lengthBounds(frontend bool, typ byte) (lo, hi int) {
+	const kb, mb = 1 << 10, 1 << 20
+	if frontend {
+		switch typ {
+		case 'S', 'H', 'X', 'c': // Sync, Flush, Terminate, CopyDone
+			return 4, 4
+		case 'E': // Execute: portal name + row limit
+			return 9, 64 * kb
+		case 'C', 'D': // Close, Describe
+			return 6, 64 * kb
+		case 'p', 'f': // password / SASL, CopyFail
+			return 5, mb
+		}
+		return 4, maxMsgLen // Query, Parse, Bind, FunctionCall, CopyData
+	}
+	switch typ {
+	case 'Z':
+		return 5, 5
+	case '1', '2', '3', 'n', 's', 'I', 'c': // *Complete, NoData, PortalSuspended, EmptyQuery, CopyDone
+		return 4, 4
+	case 'K':
+		return 12, 12
+	case 'C': // CommandComplete
+		return 5, 4 * kb
+	case 'R', 'S', 'v': // Authentication, ParameterStatus, NegotiateProtocolVersion
+		return 8, 64 * kb
+	case 'E', 'N', 'A': // Error, Notice, Notification
+		return 5, 4 * mb
+	case 'T', 't', 'G', 'H', 'W': // RowDescription, ParameterDescription, Copy*Response
+		return 6, 16 * mb
+	}
+	return 4, maxMsgLen // DataRow, CopyData, FunctionCallResponse
+}
+
 func typeSet(s string) (t [256]bool) {
 	for i := 0; i < len(s); i++ {
 		t[s[i]] = true
@@ -80,8 +119,9 @@ func (s *stream) plausibleStart(p []byte) bool {
 	if len(p) < 5 || !s.valid(p[0]) {
 		return false
 	}
-	l := binary.BigEndian.Uint32(p[1:5])
-	return l >= 4 && l <= maxMsgLen
+	l := int(binary.BigEndian.Uint32(p[1:5]))
+	lo, hi := lengthBounds(s.frontend, p[0])
+	return l >= lo && l <= hi
 }
 
 func isStartupCode(c uint32) bool {
@@ -231,7 +271,10 @@ func (s *stream) sizes() (size, keep int, ok bool) {
 		return l, l, true
 	}
 	typ, l := s.buf[0], int(binary.BigEndian.Uint32(s.buf[1:5]))
-	if !s.valid(typ) || l < 4 || l > maxMsgLen {
+	if !s.valid(typ) {
+		return 0, 0, false
+	}
+	if lo, hi := lengthBounds(s.frontend, typ); l < lo || l > hi {
 		return 0, 0, false
 	}
 	if !s.needBody(typ) {
