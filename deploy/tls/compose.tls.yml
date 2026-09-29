@@ -1,0 +1,26 @@
+# TLS on both hops for tests:
+#   cd deploy && COMPOSE_FILE=docker-compose.yml:tls/compose.tls.yml docker compose ...
+# PGBOUNCER_TLS_INI picks the pgbouncer config in deploy/tls (default: strict).
+services:
+  postgres:
+    volumes:
+      - ./tls/certs:/certs-src:ro
+      - ./tls/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # postgres requires its key to be owned by it with mode 0600.
+    entrypoint: ["sh", "-c", "mkdir -p /tls && cp /certs-src/postgres.key /certs-src/postgres.crt /certs-src/root.crt /tls/ && chown postgres /tls/* && chmod 600 /tls/postgres.key && exec docker-entrypoint.sh \"$$@\"", "--"]
+    command: ["postgres", "-c", "max_connections=200", "-c", "ssl=on",
+              "-c", "ssl_cert_file=/tls/postgres.crt", "-c", "ssl_key_file=/tls/postgres.key",
+              "-c", "ssl_ca_file=/tls/root.crt", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+  pgbouncer:
+    volumes:
+      - ./tls/${PGBOUNCER_TLS_INI:-pgbouncer.strict.ini}:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - ./tls/certs:/certs:ro
+  loadgen:
+    environment:
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /certs/root.crt
+      PGSSLCERT: /certs/client.crt
+      PGSSLKEY: /certs/client.key
+    volumes:
+      - ./tls/certs:/certs:ro
