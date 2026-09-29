@@ -130,7 +130,10 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-attach-param-sync` | `true` | attach pgbouncer's parameter-sync `SET`/`RESET` statements (e.g. `SET application_name`) to the client query they precede, as internal children |
 
 The image sets `GOMEMLIMIT=768MiB`, a soft memory cap for the Go runtime;
-override it with `-e` to match the agent's memory budget.
+override it with `-e` to match the agent's memory budget. It is built on
+`gcr.io/distroless/static-debian12` (≈ 14 MB; CA certificates included, no
+shell), so debug through `/metrics`, `-pprof` and `-debug-dump-dir` rather
+than `docker exec`.
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.
@@ -177,9 +180,9 @@ Pushing a tag like `v1.2.3` runs `.github/workflows/release.yml`, which:
   archives only.
 
 ```bash
-docker pull ghcr.io/t1bur1an/pgtrace-agent:0.2.1
+docker pull ghcr.io/t1bur1an/pgtrace-agent:0.2.2
 docker run --rm --privileged --pid host -v /sys/kernel/tracing:/sys/kernel/tracing \
-  ghcr.io/t1bur1an/pgtrace-agent:0.2.1 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
+  ghcr.io/t1bur1an/pgtrace-agent:0.2.2 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
 ```
 
 The body of the annotated tag's message (everything after its first line)

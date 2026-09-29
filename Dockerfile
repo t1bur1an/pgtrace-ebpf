@@ -8,7 +8,9 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /pgtrace-agent ./cmd/pgtrace-agent
 
-FROM debian:bookworm-slim
+# Static binary: no libc or shell needed. The root variant, since the agent
+# loads BPF programs; includes CA certificates for an https OTLP endpoint.
+FROM gcr.io/distroless/static-debian12
 LABEL org.opencontainers.image.title="pgtrace-agent" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/t1bur1an/pgtrace-ebpf"
