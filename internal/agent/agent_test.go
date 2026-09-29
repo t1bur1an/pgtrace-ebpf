@@ -36,11 +36,12 @@ func (f *fakeFilter) Ignore(k event.ConnKey) { f.ignored = append(f.ignored, k) 
 func (f *fakeFilter) Clear(k event.ConnKey)  { f.cleared = append(f.cleared, k) }
 
 var (
-	server = event.ConnKey{PID: 1, FD: 10}
-	client = event.ConnKey{PID: 1, FD: 11}
-	peer   = netip.MustParseAddrPort("10.0.0.9:40000")
-	q      = msg('Q', "select 1\x00")
-	resp   = append(msg('C', "SELECT 1\x00"), msg('Z', "I")...)
+	server        = event.ConnKey{PID: 1, FD: 10}
+	client        = event.ConnKey{PID: 1, FD: 11}
+	peer          = netip.MustParseAddrPort("10.0.0.9:40000")
+	q             = msg('Q', "select 1\x00")
+	resp          = append(msg('C', "SELECT 1\x00"), msg('Z', "I")...)
+	sslRequestMsg = []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f} // SSLRequest (80877103)
 )
 
 type got struct {

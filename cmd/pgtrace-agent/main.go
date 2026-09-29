@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
-	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -209,9 +208,13 @@ func run(c config) error {
 	cm := connmap.New(connmap.Config{ProcRoot: c.procRoot, PGPort: uint16(c.pgPort), ListenPort: uint16(c.listenPort), ClientTracing: c.clientTracing})
 	// Peek, not Lookup: an orphan's server may already be closed, and
 	// resolving its fd number again could cache a reused fd's details.
-	serverAddr := func(k event.ConnKey) netip.AddrPort { info, _ := cm.Peek(k); return info.Remote }
+	var ag *agent.Agent
+	serverConn := func(k event.ConnKey) export.ServerConn {
+		info, _ := cm.Peek(k)
+		return export.ServerConn{Addr: info.Remote, TLS: ag.TLSInfo(k)}
+	}
 	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
-	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
+	ag = agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
 		met.ObserveTrace(tr, metricsClient(client))
 		if c.sqlcommenter && tr.Client != nil {
 			client = withComment(client, tr.Client.Q, met)
@@ -219,7 +222,7 @@ func run(c config) error {
 		keep, reason := smp.DecideTraceIdle(tr, c.parentSampling && client.UseParent && export.Sampled(client.Comment), client.IdleInTx)
 		met.SpanDecision(reason, keep)
 		if keep {
-			exp.ExportTrace(tr, reason, client, serverAddr)
+			exp.ExportTrace(tr, reason, client, serverConn)
 		}
 	})
 	ag.Filter = capt
@@ -244,11 +247,13 @@ func run(c config) error {
 				st, ss, cs := ag.Stats(), smp.Stats(), ag.CorrelationStats()
 				met.SetTracedProcesses(len(capt.Pids()))
 				met.Evict()
-				met.SetConnections("server", int(st.Server))
-				met.SetConnections("client", int(st.Client))
+				met.SetConnections("server", true, int(st.ServerTLS))
+				met.SetConnections("server", false, int(st.Server-st.ServerTLS))
+				met.SetConnections("client", true, int(st.ClientTLS))
+				met.SetConnections("client", false, int(st.Client-st.ClientTLS))
 				bpfTime, bpfRuns := capt.ProgStats()
 				slog.Info("stats", "events", st.Events, "queries", st.Queries,
-					"server_conns", st.Server, "client_conns", st.Client, "traces", ss["seen"],
+					"server_conns", st.Server, "client_conns", st.Client, "server_tls", st.ServerTLS, "client_tls", st.ClientTLS, "traces", ss["seen"],
 					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_parent", ss["kept_parent"], "kept_ratio", ss["kept_ratio"],
 					"corr_exact", cs[correlate.Exact], "corr_inferred", cs[correlate.Inferred], "corr_none", cs[correlate.None],
 					"corr_internal", cs["internal"], "corr_orphan", cs["orphan"],
