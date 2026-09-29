@@ -32,7 +32,7 @@ jobs:
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "dist/$name/pgtrace-agent" ./cmd/pgtrace-agent
           "dist/$name/pgtrace-agent" -version
-          cp README.md docs/metrics.md "dist/$name/"
+          cp LICENSE README.md docs/metrics.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > checksums.txt)
 
@@ -47,7 +47,11 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository_owner }}/pgtrace-agent
+          labels: |
+            org.opencontainers.image.title=pgtrace-agent
+            org.opencontainers.image.description=eBPF agent tracing queries through pgbouncer to postgres (OpenTelemetry traces, Prometheus metrics)
+            org.opencontainers.image.licenses=MIT
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -68,7 +72,21 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          flags=(--title "$GITHUB_REF_NAME" --generate-notes --verify-tag)
+          image="ghcr.io/${OWNER,,}/pgtrace-agent:${GITHUB_REF_NAME#v}"
+          cat > notes.md <<NOTES
+          ## Container image
+
+          \`\`\`bash
+          docker pull ${image}
+          docker run --rm --privileged --pid host \\
+            -v /sys/kernel/tracing:/sys/kernel/tracing \\
+            ${image} -otlp-endpoint http://<victoriatraces>:10428/insert/opentelemetry/v1/traces
+          \`\`\`
+
+          The agent needs privileges (CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE, or \`--privileged\`) and the host pid namespace; linux/amd64, kernel with BTF and fentry/fexit (5.5+).
+          NOTES
+          flags=(--title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes --verify-tag)
           [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt "${flags[@]}"

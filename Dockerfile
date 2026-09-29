@@ -9,5 +9,9 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /pgtrace-agent ./cmd/pgtrace-agent
 
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="pgtrace-agent" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/t1bur1an/pgtrace-ebpf"
+COPY LICENSE /LICENSE
 COPY --from=build /pgtrace-agent /usr/local/bin/pgtrace-agent
 ENTRYPOINT ["/usr/local/bin/pgtrace-agent"]

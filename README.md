@@ -156,11 +156,18 @@ Pushing a tag like `v1.2.3` runs `.github/workflows/release.yml`, which:
 - publishes `pgtrace-agent_<tag>_linux_amd64.tar.gz` and `checksums.txt` as a
   GitHub Release with generated notes (tags containing `-`, e.g.
   `v1.0.0-rc1`, become pre-releases);
-- pushes the image `ghcr.io/t1bur1an/pgtrace-ebpf:<version>` (plus
-  `:<major>.<minor>` and `:latest` for non-pre-releases).
+- pushes the image `ghcr.io/t1bur1an/pgtrace-agent:<version>` (plus
+  `:<major>.<minor>` and `:latest` for non-pre-releases) and lists it in the
+  release notes. (`v0.1.0` was published as `ghcr.io/t1bur1an/pgtrace-ebpf`.)
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+docker pull ghcr.io/t1bur1an/pgtrace-agent:0.1.1
+docker run --rm --privileged --pid host -v /sys/kernel/tracing:/sys/kernel/tracing \
+  ghcr.io/t1bur1an/pgtrace-agent:0.1.1 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
+```
+
+```bash
+git tag -a v0.1.2 -m "v0.1.2" && git push origin v0.1.2
 ```
 
 `.github/workflows/ci.yml` runs vet, race-enabled tests, a check that the BPF
