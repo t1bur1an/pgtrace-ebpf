@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -247,5 +249,30 @@ func TestIdleInTransaction(t *testing.T) {
 	}
 	if d := traces[1].info.IdleInTx; d < 4999*time.Millisecond || d > 5001*time.Millisecond {
 		t.Fatalf("idle in transaction %v", d)
+	}
+}
+
+func TestFlightRecorderDumpsOnOrphan(t *testing.T) {
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	a := New(cm, func(correlate.Trace, export.ClientInfo) {})
+	a.DumpDir = t.TempDir()
+	events := make(chan any, 8)
+	events <- event.Accept{Key: client, Addr: peer}
+	events <- event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+	events <- data(client, event.DirRecv, 1, q)
+	events <- data(server, event.DirSend, 2, q)
+	events <- event.Close{Key: client} // client gone before the server replies
+	events <- data(server, event.DirRecv, 3, resp)
+	close(events)
+	a.Run(context.Background(), events)
+	files, _ := os.ReadDir(a.DumpDir)
+	if len(files) != 1 {
+		t.Fatalf("%d dump files", len(files))
+	}
+	b, _ := os.ReadFile(filepath.Join(a.DumpDir, files[0].Name()))
+	for _, want := range []string{"orphan: server", "parser: groups=", "send total="} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("dump lacks %q:\n%s", want, b)
+		}
 	}
 }

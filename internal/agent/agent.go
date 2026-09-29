@@ -4,7 +4,13 @@ package agent
 
 import (
 	"context"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -46,7 +52,18 @@ type conn struct {
 
 	inTxSince uint64                   // end of the last query that left a transaction open
 	idle      map[uint64]time.Duration // client query id → idle-in-transaction gap before it
+	recent    []recorded               // flight recorder ring (DumpDir only)
+	recentPos int
 }
+
+type recorded struct {
+	ts    uint64
+	dir   event.Dir
+	total uint32
+	head  []byte
+}
+
+const recorderEvents, recorderBytes = 64, 1024
 
 type Agent struct {
 	Filter  Filter           // optional
@@ -54,6 +71,11 @@ type Agent struct {
 	Parser  pgwire.Options   // per-connection parser options
 	// OnConnError receives errors that arrive with no query in flight.
 	OnConnError func(export.ConnError)
+	// DumpDir enables the flight recorder: the last events of every
+	// connection are kept, and the first orphaned query of a server
+	// connection dumps both connections' history there (diagnostics).
+	DumpDir string
+	dumps   map[event.ConnKey]bool
 
 	cm     *connmap.Map
 	sink   Sink
@@ -71,6 +93,13 @@ func New(cm *connmap.Map, sink Sink) *Agent {
 }
 
 func (a *Agent) emit(tr correlate.Trace) {
+	if a.DumpDir != "" && tr.Client == nil {
+		for _, sq := range tr.Server {
+			if sq.Correlation != correlate.None {
+				a.dumpOrphan(sq)
+			}
+		}
+	}
 	info := export.ClientInfo{}
 	if tr.Client != nil {
 		if c := a.conns[tr.Client.Key]; c != nil {
@@ -201,6 +230,15 @@ func (a *Agent) data(ev event.Data) {
 		a.conns[ev.Key] = c
 		a.count(c.side, 1)
 	}
+	if a.DumpDir != "" {
+		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
+		if len(c.recent) < recorderEvents {
+			c.recent = append(c.recent, r)
+		} else {
+			c.recent[c.recentPos] = r
+			c.recentPos = (c.recentPos + 1) % recorderEvents
+		}
+	}
 	pid := ev.Key.PID
 	a.cor.Event(pid)
 	if c.side == connmap.SideClient && ev.Dir == event.DirRecv {
@@ -293,3 +331,49 @@ func (a *Agent) SetAttachParamSync(on bool) { a.cor.AttachParamSync = on }
 
 // CorrelationStats returns the correlator's counters.
 func (a *Agent) CorrelationStats() map[string]uint64 { return a.cor.Stats() }
+
+// dumpOrphan writes the flight recorder of an orphaned query's server and
+// client connections, once per server connection, at most 20 files.
+func (a *Agent) dumpOrphan(sq correlate.ServerQuery) {
+	if a.dumps == nil {
+		a.dumps = map[event.ConnKey]bool{}
+	}
+	if a.dumps[sq.Key] || len(a.dumps) >= 20 {
+		return
+	}
+	a.dumps[sq.Key] = true
+	var b strings.Builder
+	fmt.Fprintf(&b, "orphan: server %v query q%d %q start=%d end=%d tx=%q attributed to client %v (%s)\n\n",
+		sq.Key, sq.Q.ID, trunc(sq.Q.SQL, 80), sq.Q.Start, sq.Q.End, sq.Q.TxStatus, sq.Client, sq.Correlation)
+	b.WriteString(a.cor.Debug(sq.Key, sq.Client))
+	for _, k := range []event.ConnKey{sq.Key, sq.Client} {
+		c := a.conns[k]
+		if c == nil {
+			fmt.Fprintf(&b, "\n== %v: no parser state\n", k)
+			continue
+		}
+		fmt.Fprintf(&b, "\n== %v (%s) parser: %s", k, c.side, c.p.DebugState())
+		n := len(c.recent)
+		for i := 0; i < n; i++ {
+			r := c.recent[(c.recentPos+i)%n]
+			dir := "send"
+			if r.dir == event.DirRecv {
+				dir = "recv"
+			}
+			fmt.Fprintf(&b, "%d %s total=%d captured=%d\n%s\n", r.ts, dir, r.total, len(r.head), hex.Dump(r.head))
+		}
+	}
+	name := filepath.Join(a.DumpDir, fmt.Sprintf("orphan-pid%d-fd%d-%d.txt", sq.Key.PID, sq.Key.FD, sq.Q.End))
+	if err := os.WriteFile(name, []byte(b.String()), 0o644); err != nil {
+		slog.Warn("flight recorder dump", "err", err)
+		return
+	}
+	slog.Warn("orphaned server query: flight recorder dumped", "file", name)
+}
+
+func trunc(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}

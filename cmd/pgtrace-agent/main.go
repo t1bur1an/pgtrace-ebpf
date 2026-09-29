@@ -58,6 +58,7 @@ type config struct {
 	parentSampling     bool
 	attachParamSync    bool
 	pprof              bool
+	debugDumpDir       string
 }
 
 func main() {
@@ -83,6 +84,7 @@ func main() {
 	flag.DurationVar(&c.labelTTL, "metrics-label-ttl", 30*time.Minute, "client label combinations idle this long are removed")
 	flag.BoolVar(&c.sqlcommenter, "sqlcommenter", true, "read SQLCommenter comments; a traceparent makes the application span the parent of the pgbouncer span")
 	flag.BoolVar(&c.parentSampling, "sqlcommenter-parent-sampling", true, "always keep traces whose SQLCommenter parent is sampled")
+	flag.StringVar(&c.debugDumpDir, "debug-dump-dir", "", "diagnostics: keep recent events per connection and dump them here when a server query is orphaned")
 	flag.BoolVar(&c.pprof, "pprof", false, "serve Go profiling endpoints at /debug/pprof/ on -metrics-addr (diagnostics only)")
 	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -210,6 +212,7 @@ func run(c config) error {
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
 	ag.SetAttachParamSync(c.attachParamSync)
+	ag.DumpDir = c.debugDumpDir
 	slog.Info("attached", "version", version, "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,

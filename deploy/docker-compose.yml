@@ -54,10 +54,12 @@ services:
       PGTRACE_METRICS_LABEL_LIMIT: "${PGTRACE_METRICS_LABEL_LIMIT:-200}"
       PGTRACE_ATTACH_PARAM_SYNC: "${PGTRACE_ATTACH_PARAM_SYNC:-true}"
       PGTRACE_PPROF: "${PGTRACE_PPROF:-false}"
+      PGTRACE_DEBUG_DUMP_DIR: "${PGTRACE_DEBUG_DUMP_DIR:-}"
     ports:
       - "9464:9464"
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing
+      - ./dumps:/dumps
       - /sys/kernel/debug:/sys/kernel/debug
 
   prometheus:

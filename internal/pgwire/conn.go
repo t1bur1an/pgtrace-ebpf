@@ -412,3 +412,22 @@ func operation(sql, tag string) string {
 	}
 	return ""
 }
+
+// DebugState describes in-flight parser state (diagnostics).
+func (c *Conn) DebugState() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "groups=%d open=%v nextID=%d fe{synced=%v buf=%d discard=%d} be{synced=%v buf=%d discard=%d}\n",
+		len(c.groups), c.open != nil, c.nextID, c.fe.synced, len(c.fe.buf), c.fe.discard, c.be.synced, len(c.be.buf), c.be.discard)
+	for i, g := range c.groups {
+		fmt.Fprintf(&b, "  group %d: simple=%v next=%d failed=%v queries=", i, g.simple, g.next, g.failed)
+		for _, q := range g.queries {
+			sql := q.SQL
+			if len(sql) > 40 {
+				sql = sql[:40]
+			}
+			fmt.Fprintf(&b, "[q%d %q end=%d] ", q.ID, sql, q.End)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}

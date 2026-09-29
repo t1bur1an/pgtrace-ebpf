@@ -11,7 +11,9 @@
 package correlate
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +35,7 @@ type ClientQuery struct {
 
 type ServerQuery struct {
 	Key         event.ConnKey
+	Client      event.ConnKey // client the query was attributed to (zero if none)
 	Q           pgwire.Query
 	Correlation string
 	Internal    bool // issued by pgbouncer itself, not forwarded from the client
@@ -369,7 +372,7 @@ func (c *Correlator) ServerDone(k event.ConnKey, q pgwire.Query) {
 		c.flushNone([]ServerQuery{sq})
 		return
 	}
-	sq := ServerQuery{Key: k, Q: q, Correlation: a.correlation, Internal: a.internal}
+	sq := ServerQuery{Key: k, Client: a.client, Q: q, Correlation: a.correlation, Internal: a.internal}
 	cl := c.clients[a.client]
 	if cl == nil {
 		c.orphan([]ServerQuery{sq})
@@ -528,3 +531,42 @@ func (c *Correlator) Entries() map[string]int {
 // whether the client read happened immediately before (an immediate forward)
 // or earlier (the client waited for a server).
 func (c *Correlator) Event(pid uint32) { c.seq[pid]++ }
+
+// Debug describes the correlator's state for a server and a client
+// connection (diagnostics). Call from the correlator's goroutine.
+func (c *Correlator) Debug(server, client event.ConnKey) string {
+	var b strings.Builder
+	if s := c.servers[server]; s != nil {
+		ids := make([]uint64, 0, len(s.attr))
+		for id := range s.attr {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		fmt.Fprintf(&b, "server %v: linked=%v link=%v linkQID=%d inflight=%v unattributed=%v paramsync=%d\n",
+			server, s.linked, s.link, s.linkQID, ids, s.unattributed, len(s.held))
+		for _, id := range ids {
+			a := s.attr[id]
+			fmt.Fprintf(&b, "  server q%d -> client %v q%d %s internal=%v\n", id, a.client, a.qid, a.correlation, a.internal)
+		}
+	} else {
+		fmt.Fprintf(&b, "server %v: not tracked\n", server)
+	}
+	if cl := c.clients[client]; cl != nil {
+		var q []uint64
+		for _, p := range cl.queue {
+			q = append(q, p.id)
+		}
+		var h []uint64
+		for id := range cl.held {
+			h = append(h, id)
+		}
+		slices.Sort(h)
+		fmt.Fprintf(&b, "client %v: queued=%v held=%v servers=%d\n", client, q, h, len(cl.servers))
+	} else {
+		fmt.Fprintf(&b, "client %v: not tracked\n", client)
+	}
+	if lr, ok := c.lastRd[server.PID]; ok {
+		fmt.Fprintf(&b, "last read: %v at seq %d (now %d)\n", lr.key, lr.seq, c.seq[server.PID])
+	}
+	return b.String()
+}
