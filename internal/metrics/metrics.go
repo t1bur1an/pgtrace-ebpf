@@ -5,6 +5,7 @@
 package metrics
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ type Config struct {
 	Labels []string      // subset of LabelNames; empty disables labelled metrics
 	Limit  int           // most distinct label combinations tracked at once
 	TTL    time.Duration // idle combinations are deleted after this long
+	TLS    bool          // -tls-capture: register the TLS series
 }
 
 // Client identifies the client of a trace for labelled metrics.
@@ -57,25 +59,26 @@ type labelled struct {
 }
 
 type Metrics struct {
-	queries      *prometheus.CounterVec
-	duration     *prometheus.HistogramVec
-	errors       *prometheus.CounterVec
-	poolWait     prometheus.Histogram
-	correlation  *prometheus.CounterVec
-	spans        *prometheus.CounterVec
-	events       *prometheus.CounterVec
-	truncations  *prometheus.CounterVec
-	traceContext *prometheus.CounterVec
-	connErrors   *prometheus.CounterVec
-	idleInTx     prometheus.Histogram
-	conns        *prometheus.GaugeVec
-	corEntries   *prometheus.GaugeVec
-	resyncs      *prometheus.CounterVec
-	exportSpans  *prometheus.CounterVec
-	gaps         *prometheus.CounterVec
-	gapBytes     *prometheus.CounterVec
-	processes    prometheus.Gauge
-	reg          prometheus.Registerer
+	queries       *prometheus.CounterVec
+	duration      *prometheus.HistogramVec
+	errors        *prometheus.CounterVec
+	poolWait      prometheus.Histogram
+	correlation   *prometheus.CounterVec
+	spans         *prometheus.CounterVec
+	events        *prometheus.CounterVec
+	truncations   *prometheus.CounterVec
+	traceContext  *prometheus.CounterVec
+	connErrors    *prometheus.CounterVec
+	idleInTx      prometheus.Histogram
+	conns         *prometheus.GaugeVec
+	corEntries    *prometheus.GaugeVec
+	resyncs       *prometheus.CounterVec
+	exportSpans   *prometheus.CounterVec
+	gaps          *prometheus.CounterVec
+	gapBytes      *prometheus.CounterVec
+	tlsUnresolved *prometheus.CounterVec
+	processes     prometheus.Gauge
+	reg           prometheus.Registerer
 
 	cfg       Config
 	labelled  *labelled
@@ -156,13 +159,20 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Help: "Queries the correlator is tracking, by kind: queued, held, inflight, unattributed, paramsync.",
 		}, []string{"kind"}),
 		conns: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "pgtrace_connections", Help: "Tracked pgbouncer sockets, by side.",
-		}, []string{"side"}),
+			Name: "pgtrace_connections", Help: "Tracked pgbouncer sockets, by side and whether they use TLS.",
+		}, []string{"side", "tls"}),
 		processes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "pgtrace_traced_processes", Help: "pgbouncer processes being traced.",
 		}),
 	}
 	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.corEntries, m.resyncs, m.exportSpans, m.gaps, m.gapBytes, m.conns, m.processes)
+	if cfg.TLS {
+		m.tlsUnresolved = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_tls_unresolved_total",
+			Help: "TLS plaintext events whose socket wasn't known when captured: fed once their socket was found (resolved) or dropped.",
+		}, []string{"result"})
+		reg.MustRegister(m.tlsUnresolved)
+	}
 	if len(cfg.Labels) > 0 {
 		m.registerLabelled()
 	}
@@ -217,8 +227,11 @@ func MaxSeries(cfg Config) int {
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
 		2*(maxSQLStates+1) + // connection_errors_total: side × sqlstate
 		h + h + // pool_wait_seconds, idle_in_transaction_seconds
-		5 + 5 + 4 + 3 + 3 + 5 + 2 + 4 + 1 + 4 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, export_queue_length, capture_gaps(+bytes), connections, traced_processes
+		5 + 5 + 4 + 3 + 3 + 5 + 2 + 4 + 1 + 4 + 4 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, export_queue_length, capture_gaps(+bytes), connections (side × tls), traced_processes
 		1 + 2 + 5 // kernel drops, bpf run time/runs, recursion misses per program
+	if cfg.TLS {
+		n += 2 + 1 + 2 + 11 // tls_processes, tls_fallback_attached, tls_unresolved, recursion misses of the TLS programs
+	}
 	if len(cfg.Labels) > 0 {
 		n += (cfg.Limit+1)*SeriesPerLabelSet + 2 // +1 for 'other'; label_sets, overflow
 	}
@@ -358,8 +371,39 @@ func (m *Metrics) IdleInTransaction(d time.Duration) { m.idleInTx.Observe(d.Seco
 func (m *Metrics) ConnectionError(side, code string) {
 	m.connErrors.WithLabelValues(side, m.sqlstateLabel(code)).Inc()
 }
-func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
-func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
+func (m *Metrics) SetConnections(side string, tls bool, n int) {
+	m.conns.WithLabelValues(side, strconv.FormatBool(tls)).Set(float64(n))
+}
+func (m *Metrics) SetTracedProcesses(n int) { m.processes.Set(float64(n)) }
+
+// TLSUnresolved counts a socket-less TLS event: "resolved" or "dropped".
+func (m *Metrics) TLSUnresolved(result string) {
+	if m.tlsUnresolved != nil {
+		m.tlsUnresolved.WithLabelValues(result).Inc()
+	}
+}
+
+// RegisterTLS exposes TLS capture state, read on scrape.
+func (m *Metrics) RegisterTLS(processes func() (attached, unsupported int), fallback func() bool) {
+	proc := func(state string, pick func(a, u int) int) prometheus.Collector {
+		return prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "pgtrace_tls_processes", Help: "pgbouncer processes with TLS probes attached, or whose TLS can't be captured.",
+			ConstLabels: prometheus.Labels{"state": state},
+		}, func() float64 { a, u := processes(); return float64(pick(a, u)) })
+	}
+	m.reg.MustRegister(
+		proc("attached", func(a, _ int) int { return a }),
+		proc("unsupported", func(_, u int) int { return u }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "pgtrace_tls_fallback_attached", Help: "1 while the socket-finding fallback for pre-existing TLS sessions is attached.",
+		}, func() float64 {
+			if fallback() {
+				return 1
+			}
+			return 0
+		}),
+	)
+}
 
 // ExportHooks feed pgtrace_export_spans_total. Each takes a span count;
 // failed counts one failed batch whatever its size.

@@ -61,8 +61,10 @@ func TestSeriesBounded(t *testing.T) {
 		m.Truncation([]string{"kernel", "parser", "export"}[r.IntN(3)])
 		m.SpanDecision("ratio", r.IntN(2) == 0)
 	}
-	m.SetConnections("client", 1)
-	m.SetConnections("server", 1)
+	for _, side := range []string{"client", "server"} {
+		m.SetConnections(side, true, 1)
+		m.SetConnections(side, false, 1)
+	}
 	m.SetTracedProcesses(1)
 	got, ceiling := series(t, reg), MaxSeries(cfg)
 	t.Logf("series: %d, documented ceiling: %d", got, ceiling)
@@ -130,5 +132,43 @@ func TestSQLStateCap(t *testing.T) {
 	}
 	if v := testutil.ToFloat64(m.errors.WithLabelValues("server", "OTHER")); v != 1000-maxSQLStates {
 		t.Fatalf("OTHER = %v", v)
+	}
+}
+
+func TestSeriesBoundedWithTLS(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	cfg := Config{TLS: true}
+	m := NewWith(reg, cfg)
+	m.RegisterKernel(func() uint64 { return 0 }, func() (time.Duration, uint64) { return 0, 0 }, true)
+	progs := map[string]uint64{}
+	for _, p := range []string{"exit_sendto", "exit_recvfrom", "exit_connect", "exit_accept4", "enter_close",
+		"ssl_write", "ssl_write_ret", "ssl_read_enter", "ssl_read_exit", "ssl_set_rfd", "ssl_free",
+		"ssl_ver_enter", "ssl_ver_exit", "ssl_cipher_exit", "fallback_read", "fallback_write"} {
+		progs[p] = 1
+	}
+	m.RegisterRecursionMisses(func() map[string]uint64 { return progs })
+	m.RegisterTLS(func() (int, int) { return 1, 0 }, func() bool { return false })
+	r := rand.New(rand.NewPCG(3, 4))
+	for i := 0; i < 5000; i++ {
+		m.ObserveTrace(randomTrace(r), Client{})
+		m.Event([]string{"data", "connect", "accept", "close"}[r.IntN(4)])
+		m.Truncation([]string{"kernel", "parser", "export"}[r.IntN(3)])
+		m.SpanDecision("ratio", r.IntN(2) == 0)
+		m.TLSUnresolved([]string{"resolved", "dropped"}[r.IntN(2)])
+		m.CaptureGap([]string{"client", "server"}[r.IntN(2)], 1)
+		m.ParserResync([]string{"client", "server"}[r.IntN(2)])
+	}
+	for _, side := range []string{"client", "server"} {
+		m.SetConnections(side, true, 1)
+		m.SetConnections(side, false, 1)
+	}
+	m.SetTracedProcesses(1)
+	got, ceiling := series(t, reg), MaxSeries(cfg)
+	t.Logf("series: %d, ceiling: %d", got, ceiling)
+	if got > ceiling {
+		t.Fatalf("%d series exceed the ceiling %d", got, ceiling)
+	}
+	if MaxSeries(Config{}) != 2541 || ceiling != 2557 {
+		t.Fatalf("ceilings %d / %d, want 2541 / 2557", MaxSeries(Config{}), ceiling)
 	}
 }
