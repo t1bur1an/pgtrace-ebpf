@@ -63,7 +63,22 @@ type Span struct {
 	PID    uint32
 	FD     int32
 	Remote netip.AddrPort
+	TLS    TLSInfo
 	Reason sampler.Reason
+}
+
+// TLSInfo describes a connection's TLS, if any. Version and Cipher are
+// best-effort (known when pgbouncer asked OpenSSL for them).
+type TLSInfo struct {
+	On      bool
+	Version string // "1.3", "1.2", …; empty if unknown
+	Cipher  string // e.g. "TLS_AES_256_GCM_SHA384"; empty if unknown
+}
+
+// ServerConn describes the server connection of one server query.
+type ServerConn struct {
+	Addr netip.AddrPort
+	TLS  TLSInfo
 }
 
 // ClientInfo describes the client connection of a trace's root query.
@@ -78,6 +93,8 @@ type ClientInfo struct {
 	// IdleInTx is how long the client sat idle inside a transaction (holding
 	// its server connection) before sending this query.
 	IdleInTx time.Duration
+	// TLS of the client connection.
+	TLS TLSInfo
 }
 
 // ConnError is an error on a connection with no query in flight: a rejected
@@ -89,6 +106,7 @@ type ConnError struct {
 	Code, Message string
 	Addr          netip.AddrPort    // peer address
 	Params        map[string]string // client startup parameters, if seen
+	TLS           TLSInfo
 }
 
 type jobKind uint8
@@ -104,7 +122,7 @@ type job struct {
 	trace   correlate.Trace
 	reason  sampler.Reason
 	client  ClientInfo
-	servers []netip.AddrPort // address of each trace.Server entry
+	servers []ServerConn // server connection of each trace.Server entry
 	span    Span
 	connErr ConnError
 }
@@ -219,7 +237,7 @@ func (e *Exporter) ExportConnError(c ConnError) {
 // ExportTrace queues a client query (SERVER span) with its server queries
 // (CLIENT children). Traces without a client query export each server query
 // as its own trace. server is resolved now, on the caller's goroutine.
-func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
+func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) ServerConn) {
 	j := jobPool.Get().(*job)
 	for _, sq := range t.Server {
 		j.servers = append(j.servers, server(sq.Key))
@@ -383,7 +401,7 @@ func (w *worker) trace(j *job) {
 	child := func(tid [16]byte, parent [8]byte, i int) {
 		sq := t.Server[i]
 		w.serverSpan(tid, w.spanID(), parent,
-			Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: j.servers[i], Reason: j.reason},
+			Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: j.servers[i].Addr, TLS: j.servers[i].TLS, Reason: j.reason},
 			sq.Correlation, sq.Internal, true)
 	}
 	if t.Client == nil {
@@ -418,6 +436,7 @@ func (w *worker) trace(j *job) {
 		a.i64("client.port", int64(j.client.Addr.Port()))
 	}
 	w.clientParams(j.client.Params)
+	w.tlsAttrs(j.client.TLS)
 	if j.client.IdleInTx > 0 {
 		a.f64("pgbouncer.idle_in_tx_ms", float64(j.client.IdleInTx)/1e6)
 	}
@@ -450,6 +469,7 @@ func (w *worker) serverSpan(tid [16]byte, sid, parent [8]byte, s Span, correlati
 		a.str("server.address", s.Remote.Addr().String())
 		a.i64("server.port", int64(s.Remote.Port()))
 	}
+	w.tlsAttrs(s.TLS)
 	if correlated {
 		a.str("pgtrace.correlation", correlation)
 		a.boolean("pgbouncer.internal", internal)
@@ -478,6 +498,7 @@ func (w *worker) connError(c *ConnError) {
 		a.i64(portKey, int64(c.Addr.Port()))
 	}
 	w.clientParams(c.Params)
+	w.tlsAttrs(c.TLS)
 	start := c.Start
 	if start == 0 || start > c.End {
 		start = c.End
@@ -492,6 +513,20 @@ func (w *worker) clientParams(p map[string]string) {
 		if v := p[pa[0]]; v != "" {
 			w.a.str(pa[1], clean(v, 256))
 		}
+	}
+}
+
+// tlsAttrs adds the OpenTelemetry tls.* attributes of a TLS connection.
+func (w *worker) tlsAttrs(t TLSInfo) {
+	if !t.On {
+		return
+	}
+	w.a.str("tls.protocol.name", "tls")
+	if t.Version != "" {
+		w.a.str("tls.protocol.version", clean(t.Version, 16))
+	}
+	if t.Cipher != "" {
+		w.a.str("tls.cipher", clean(t.Cipher, 64))
 	}
 }
 

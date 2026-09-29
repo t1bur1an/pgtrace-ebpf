@@ -21,7 +21,7 @@ func BenchmarkEncodeTrace(b *testing.B) {
 		trace: correlate.Trace{Client: &correlate.ClientQuery{Key: event.ConnKey{PID: 1, FD: 11}, Q: q},
 			Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 7}, Q: q, Correlation: "exact"}}},
 		client:  ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "u", "database": "d"}},
-		servers: []netip.AddrPort{netip.MustParseAddrPort("10.0.0.2:5432")}}
+		servers: []ServerConn{{Addr: netip.MustParseAddrPort("10.0.0.2:5432")}}}
 	b.ReportAllocs()
 	for b.Loop() {
 		w.encode(&j)
