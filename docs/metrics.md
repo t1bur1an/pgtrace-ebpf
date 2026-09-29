@@ -100,9 +100,11 @@ combinations than the limit. Either raise the limit, drop `client_addr`
 
 ## Measured
 
-A real scrape from the e2e run (pgbench in three modes, error cases, a 100 KB
+A real scrape from an e2e run (pgbench in three modes, error cases, a 100 KB
 statement, pool pressure on `tiny`, all three client labels enabled) had **545
-pgtrace series** (589 with Go/process). The series actually present depend on
+pgtrace series** (589 with Go/process). The breakdown below is from that run.
+The latest e2e run (2026-09-29, with the capture-gap, recursion-miss and
+export-queue series) had 577. The series actually present depend on
 which operations, SQLSTATEs and clients occurred, never on how long the agent
 has been running:
 

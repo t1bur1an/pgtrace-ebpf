@@ -13,12 +13,14 @@ client ══▶ pgbouncer ══▶ postgres
              │  fexit: __sys_sendto / __sys_recvfrom / __sys_connect / __sys_accept4
              │  fentry: __x64_sys_close
              │  in-kernel filter: traced pid, fds not marked "neither client nor server"
+             │  per event: payload + TCP stream offset (detects events the kernel skipped)
              ▼
-     BPF ringbuf ─▶ pgtrace-agent
+     BPF ringbuf ─▶ pgtrace-agent (event loop)
                       connmap (client / server socket) → pgwire parsers (both sides)
                       → correlator (link server queries to client queries)
                       ├─▶ metrics (all queries) ─▶ /metrics ─▶ Prometheus ─▶ Grafana
-                      └─▶ sampler ─▶ OTLP ─▶ VictoriaTraces ─▶ Grafana (Jaeger datasource)
+                      └─▶ sampler ─▶ export queue ─▶ N workers: OTLP protobuf ─▶ VictoriaTraces
+                                                                 ─▶ Grafana (Jaeger datasource)
 ```
 
 A trace for one client query:
@@ -63,7 +65,9 @@ dashboard has a *Contention* row. `scripts/contention.sh` provokes each case
 and checks the evidence; `docs/contention.md` explains what to look for and
 what can't be seen (e.g. which session held a lock).
 
-Performance: `docs/performance.md`. Metrics and cardinality: `docs/metrics.md`.
+Performance: `docs/performance.md` (limits found and removed:
+`docs/bottlenecks.md`). Metrics and cardinality: `docs/metrics.md`.
+Contention: `docs/contention.md`.
 
 ## Quick start
 
@@ -215,6 +219,10 @@ make generate    # re-generate BPF objects after editing bpf/pgtrace.bpf.c (clan
 - Payload capture is capped per syscall (`-capture-bytes`) and per message
   (`-max-message-bytes`); longer SQL is truncated (`pgtrace.truncated=true`)
   but the parser stays in sync. `pgtrace_truncations_total` shows which cap fires.
+- The kernel occasionally skips a capture event (fentry/fexit recursion
+  protection). The agent detects the lost bytes by TCP stream offset and
+  skips them (`pgtrace_capture_gaps_total`). When a gap covers more than one
+  message, that query can lose its link: 1 in 1.26 M in a 90-minute soak.
 - Prepared statements parsed before the agent started show as
   `<unknown prepared statement "name">`. They still correlate through their
   bind values.

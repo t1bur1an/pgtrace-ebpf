@@ -2,7 +2,8 @@
 
 What it costs to trace pgbouncer traffic with pgtrace, and how much it can
 handle. Raw data is in `docs/perf-results/`; everything here can be reproduced
-with `scripts/perf.sh` and `go test -bench`.
+with the scripts listed in [Reproduce](#reproduce) and `go test -bench`.
+Known limits and how they were removed: `docs/bottlenecks.md`.
 
 The agent has two modes. **Client + server** (`-client-tracing=true`, the
 default) traces the client side too and links each client query to its server
@@ -99,13 +100,17 @@ Agent userspace cost per client query, from the Go benchmarks on the same CPU
 |---|---:|
 | `Pipeline`: client recv + server send + server recv + client send through connmap, both parsers and the correlator | 1 535 |
 | `ObserveTrace`: Prometheus metrics for one trace | 241 |
-| `Export`: one span into the batch processor | 2 486 |
+| `Export`: one span into the batch processor (old SDK exporter) | 2 486 |
+| `EncodeTrace`: encode a client + server span to OTLP protobuf (current exporter, on a worker) | 1 158 per trace |
 | `ConnSimpleQuery` / `ConnExtendedQuery`: one parser round trip | 438 / 779 |
 
-At ratio 0.1 that is ≈ 1.5 + 0.24 + 0.1 × 2 × 2.5 ≈ **2.3 µs of agent CPU per
-client query** before ringbuf/decode overhead. Measured end-to-end, it was
-0.73 core at 88 k/s ≈ 8.3 µs, including decode, channel hand-off, the Go
-runtime and GC.
+With the old exporter, at ratio 0.1 that was ≈ 1.5 + 0.24 + 0.1 × 2 × 2.5 ≈
+**2.3 µs of agent CPU per client query** before ringbuf/decode overhead.
+Measured end-to-end, it was 0.73 core at 88 k/s ≈ 8.3 µs, including decode,
+channel hand-off, the Go runtime and GC. With the current exporter, encoding a
+kept trace costs about 1.2 µs, and it runs on the export workers, not the
+event loop. At 1,000 clients the agent used 0.51 core at 66 k client
+queries/s, ≈ 7.7 µs per query ([Export pipeline](#export-pipeline)).
 
 **Cost model with client tracing:** about 1.2 µs of kernel CPU (≈ 10 runs ×
 120 ns) and 8 µs of agent CPU per client query. For example, 10 k client
@@ -345,7 +350,7 @@ Per query through pgbouncer, at ratio 0.1:
 | kernel, BPF | ≈ 10 runs × 95 ns ≈ **1 µs** CPU | 2 runs copy payload (pgbouncer's server-side send and recv); the rest exit early: pgbouncer's client-side sockets (filtered), pgbench and postgres syscalls |
 | pgbouncer | +1.1 µs CPU per query | 5.75 → 6.89 µs of pgbouncer CPU per query (61.6 % / 106.6 k/s → 64.6 % / 92.4 k/s), i.e. its share of the probe cost above |
 | agent | ≈ **3 µs** CPU | ringbuf read + decode + parse + sample; export of the 10 % kept adds ~0.25 µs |
-| export, per kept span | ≈ 2.5 µs CPU + OTLP bytes | only spans that are kept |
+| export, per kept span | ≈ 1.6 µs CPU + OTLP bytes | only spans that are kept; on the export workers. Measured: 0.51 → 0.68 core for +107 k spans/s (10 % → 100 % sampling). Was ≈ 2.5 µs with the SDK exporter |
 
 Example: 10 k queries/s costs about 0.01 core of kernel time and 0.03 core of
 agent time. At 50 k queries/s it is about 0.05 + 0.15 cores.
@@ -358,10 +363,26 @@ agent time. At 50 k queries/s it is about 0.05 + 0.15 cores.
   16 % at 6.9 µs per query here. The fix is the usual one for a saturated
   pgbouncer: run several processes (`so_reuseport`); the agent traces all
   processes with the same name.
-- **Payload cap.** At most 4 KiB is captured per syscall. Longer SQL is
-  exported truncated (`pgtrace.truncated=true`). The parser also buffers at
-  most 64 KiB of any message and skips result rows by length, so large results
-  don't grow agent memory.
+- **Payload cap.** At most `-capture-bytes` (default 4 KiB, up to 16 KiB) is
+  copied per syscall, and the parser keeps at most `-max-message-bytes`
+  (64 KiB) of any message. Longer SQL is exported truncated
+  (`pgtrace.truncated=true`). Result rows are skipped by length, so large
+  results don't grow agent memory. See `docs/metrics.md`, *Truncation layers*.
+- **Skipped capture events.** The kernel skips a fentry/fexit run when another
+  run of the same program is active on that CPU
+  (`pgtrace_bpf_recursion_misses_total`). The agent detects the lost bytes from
+  the TCP stream offset and skips them (`pgtrace_capture_gaps_total`). A gap
+  larger than the current message makes the parser resynchronise, and the
+  query it hit can be orphaned: 1 in 1.26 M queries in the 90-minute soak.
+  Unix-socket connections have no stream offset.
+- **Single-threaded event loop.** Parsing and correlation run on one
+  goroutine: 0.43 core at 60 k client queries/s on this machine. That is the
+  next limit, at roughly 2× the tested rate. Span encoding and export run on
+  `-export-workers`.
+- **Export backpressure.** If the trace backend can't keep up, the export
+  queue (`-export-queue`) fills and new kept traces are dropped. The drops are
+  counted in `pgtrace_export_spans_total{stage="dropped"}`, and the event loop
+  never blocks.
 - **Ringbuf.** 16 MiB. The reader is woken once 1 MiB is pending and otherwise
   drains every 20 ms, so a stalled agent has roughly 16 MiB / (≈ 200 bytes per
   event × 2 events per query) ≈ 40 k queries of headroom before the kernel
@@ -405,7 +426,14 @@ select-only, 5 s smoke runs):
 go test -run '^$' -bench . -count 3 ./internal/pgwire ./internal/agent ./internal/export
 DURATION=20 ./scripts/perf.sh                     # full matrix + repeats + tpcb nosync + breakdown (~35 min)
 SKIP_MATRIX=1 SKIP_REPEATS=1 SKIP_NOSYNC=1 SKIP_BREAKDOWN=1 ./scripts/perf.sh   # only the client-tracing comparison
+./scripts/perf_1k.sh                              # 1,000 clients, one app and 10 apps (param-sync attach on/off)
+./scripts/perf_sampling.sh                        # 1,000 clients, agent off / 10 % / 100 % sampling, export + VictoriaTraces
+./scripts/soak.sh                                 # 90-minute soak with big JSON statements (DURATION=seconds)
 ```
+
+`perf_1k.sh` writes to `docs/perf-results/1k/`, `perf_sampling.sh` to
+`docs/perf-results/sampling/` (override with `OUT=`), and `soak.sh` to
+`docs/soak-results/<date>/`.
 
 Files written to `docs/perf-results/`: `results.csv` (matrix and stress),
 `repeats.csv`, `tpcb-nosync.csv`, `client-tracing.csv`, `breakdown.csv`, `completeness.txt`,
