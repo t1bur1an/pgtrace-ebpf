@@ -126,7 +126,7 @@ type Exporter struct {
 	cfg    Config
 	env    envelope
 	offset int64 // wall - monotonic, ns
-	jobs   chan job
+	jobs   chan *job
 	wg     sync.WaitGroup
 	mu     sync.RWMutex // held for reading while sending on jobs; Shutdown closes it
 	closed bool
@@ -160,7 +160,7 @@ func New(cfg Config) (*Exporter, error) {
 		cfg.clock = clocks
 	}
 	mono, wall := cfg.clock()
-	e := &Exporter{cfg: cfg, env: newEnvelope(cfg.Service), offset: wall - mono, jobs: make(chan job, cfg.QueueTraces)}
+	e := &Exporter{cfg: cfg, env: newEnvelope(cfg.Service), offset: wall - mono, jobs: make(chan *job, cfg.QueueTraces)}
 	for i := 0; i < cfg.Workers; i++ {
 		e.wg.Add(1)
 		go e.worker(uint64(i))
@@ -177,40 +177,56 @@ func clocks() (mono, wall int64) {
 // QueueLen is the number of traces waiting for a worker.
 func (e *Exporter) QueueLen() int { return len(e.jobs) }
 
-func (e *Exporter) enqueue(j job) {
+// jobs are recycled so queueing a trace doesn't allocate.
+var jobPool = sync.Pool{New: func() any { return new(job) }}
+
+func putJob(j *job) {
+	*j = job{servers: j.servers[:0]}
+	jobPool.Put(j)
+}
+
+func (e *Exporter) enqueue(j *job) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	if e.closed {
-		return
-	}
-	select {
-	case e.jobs <- j:
-	default:
-		if h := e.cfg.Hooks.Dropped; h != nil {
-			h(j.spans())
+	if !e.closed {
+		select {
+		case e.jobs <- j:
+			return
+		default:
+			if h := e.cfg.Hooks.Dropped; h != nil {
+				h(j.spans())
+			}
 		}
 	}
+	putJob(j)
 }
 
 // Export queues a single server-side span (no client query).
-func (e *Exporter) Export(s Span) { e.enqueue(job{kind: jobSpan, span: s}) }
+func (e *Exporter) Export(s Span) {
+	j := jobPool.Get().(*job)
+	j.kind, j.span = jobSpan, s
+	e.enqueue(j)
+}
 
 // ExportConnError queues a connection error as a "connect" span.
 func (e *Exporter) ExportConnError(c ConnError) {
 	c.Params = copyParams(c.Params)
-	e.enqueue(job{kind: jobConnError, connErr: c})
+	j := jobPool.Get().(*job)
+	j.kind, j.connErr = jobConnError, c
+	e.enqueue(j)
 }
 
 // ExportTrace queues a client query (SERVER span) with its server queries
 // (CLIENT children). Traces without a client query export each server query
 // as its own trace. server is resolved now, on the caller's goroutine.
 func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
-	addrs := make([]netip.AddrPort, len(t.Server))
-	for i, sq := range t.Server {
-		addrs[i] = server(sq.Key)
+	j := jobPool.Get().(*job)
+	for _, sq := range t.Server {
+		j.servers = append(j.servers, server(sq.Key))
 	}
 	client.Params = copyParams(client.Params)
-	e.enqueue(job{kind: jobTrace, trace: t, reason: reason, client: client, servers: addrs})
+	j.kind, j.trace, j.reason, j.client = jobTrace, t, reason, client
+	e.enqueue(j)
 }
 
 func copyParams(p map[string]string) map[string]string {
@@ -267,7 +283,8 @@ func (e *Exporter) worker(id uint64) {
 				w.flush()
 				return
 			}
-			w.encode(&j)
+			w.encode(j)
+			putJob(j)
 			if w.n >= e.cfg.BatchSpans {
 				w.flush()
 			}

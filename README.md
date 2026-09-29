@@ -125,9 +125,8 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-sqlcommenter-parent-sampling` | `true` | always keep traces whose SQLCommenter parent is sampled |
 | `-attach-param-sync` | `true` | attach pgbouncer's parameter-sync `SET`/`RESET` statements (e.g. `SET application_name`) to the client query they precede, as internal children |
 
-The image sets `GOGC=200` and
-`GOMEMLIMIT=768MiB` to spend less CPU on garbage collection; override them
-with `-e` if the agent needs a tighter memory budget.
+The image sets `GOMEMLIMIT=768MiB`, a soft memory cap for the Go runtime;
+override it with `-e` to match the agent's memory budget.
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.

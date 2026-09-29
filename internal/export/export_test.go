@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -449,3 +450,13 @@ func TestQueueOverflowDropsAndCounts(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The queue is allocated up front for -export-queue traces, so a slot must
+// be a pointer, not a whole job.
+func TestQueueSlotIsSmall(t *testing.T) {
+	e, _, _ := newTest(t, nil)
+	defer drain(t, e)
+	if s := reflect.TypeOf(e.jobs).Elem().Size(); s > 8 {
+		t.Fatalf("queue slot is %d bytes", s)
+	}
+}

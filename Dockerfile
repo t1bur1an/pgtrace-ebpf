@@ -14,6 +14,7 @@ LABEL org.opencontainers.image.title="pgtrace-agent" \
       org.opencontainers.image.source="https://github.com/t1bur1an/pgtrace-ebpf"
 COPY LICENSE /LICENSE
 COPY --from=build /pgtrace-agent /usr/local/bin/pgtrace-agent
-# Trade some memory for less GC CPU; override with -e GOGC=… / GOMEMLIMIT=….
-ENV GOGC=200 GOMEMLIMIT=768MiB
+# Soft memory cap: the GC works harder before the agent passes it.
+# Override with -e GOMEMLIMIT=… (or add GOGC=… to trade memory for GC CPU).
+ENV GOMEMLIMIT=768MiB
 ENTRYPOINT ["/usr/local/bin/pgtrace-agent"]
