@@ -178,8 +178,19 @@ docker run --rm --privileged --pid host -v /sys/kernel/tracing:/sys/kernel/traci
   ghcr.io/t1bur1an/pgtrace-agent:0.2.0 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
 ```
 
+The body of the annotated tag's message (everything after its first line)
+becomes the release's **Changes** section, above the image instructions and
+GitHub's generated notes. Lines starting with `#` are stripped from tag
+messages by git, so use plain section names:
+
 ```bash
-git tag -a v0.1.2 -m "v0.1.2" && git push origin v0.1.2
+git tag -a v0.3.0 -F - <<'EOF'
+v0.3.0
+
+Export
+- what changed
+EOF
+git push origin v0.3.0
 ```
 
 `.github/workflows/ci.yml` runs vet, race-enabled tests, a check that the BPF

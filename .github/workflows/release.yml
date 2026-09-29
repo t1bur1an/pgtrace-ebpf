@@ -75,7 +75,16 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           image="ghcr.io/${OWNER,,}/pgtrace-agent:${GITHUB_REF_NAME#v}"
-          cat > notes.md <<NOTES
+          # actions/checkout replaces an annotated tag with a lightweight one;
+          # fetch it again so the tag message (the changelog) is available.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          changes=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+          if [[ -n "${changes//[[:space:]]/}" ]]; then
+            printf '## Changes\n\n%s\n\n' "$changes" > notes.md
+          else
+            : > notes.md
+          fi
+          cat >> notes.md <<NOTES
           ## Container image
 
           \`\`\`bash
