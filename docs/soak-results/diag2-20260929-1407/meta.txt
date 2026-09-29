@@ -1,0 +1,10 @@
+duration_s: 5400
+started: 2026-09-29T14:07:14+03:00
+sample_ratio: 0.1
+agent_container: 8bd3397e6adca399ae755bdf3a651aea9704e031a12135bb0bc0ebde63115ede 2026-09-29T11:07:12.15363721Z
+cpu: AMD Ryzen 7 7700X 8-Core Processor (16 threads)
+memory: 61 GiB
+kernel: 7.2.7-arch1-1
+pgbouncer: PgBouncer 1.25.2
+postgres: postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2)
+finished: 2026-09-29T15:37:38+03:00
