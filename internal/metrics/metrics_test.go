@@ -176,3 +176,33 @@ func TestRecursionMisses(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestExportStages(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	created, exported, failed, dropped := m.ExportHooks()
+	created(5)
+	exported(3)
+	failed(2)
+	dropped(4)
+	q := 7
+	m.RegisterExportQueue(func() int { return q })
+	mfs, _ := reg.Gather()
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "pgtrace_export_spans_total":
+			for _, mm := range mf.Metric {
+				got[mm.Label[0].GetValue()] = mm.Counter.GetValue()
+			}
+		case "pgtrace_export_queue_length":
+			got["queue"] = mf.Metric[0].Gauge.GetValue()
+		}
+	}
+	want := map[string]float64{"created": 5, "exported": 3, "failed_batches": 1, "dropped": 4, "queue": 7}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%s = %v, want %v (all: %v)", k, got[k], v, got)
+		}
+	}
+}

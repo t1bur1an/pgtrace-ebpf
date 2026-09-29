@@ -1,21 +1,26 @@
-// Package export turns sampled queries into OpenTelemetry spans.
+// Package export turns sampled traces into OpenTelemetry spans and sends them
+// over OTLP/HTTP.
+//
+// The agent's event loop only enqueues kept traces (it never blocks); a pool
+// of workers encodes OTLP protobuf directly into reusable buffers and posts
+// batches concurrently. Every stage is counted, including traces dropped
+// because the queue was full.
 package export
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"math/rand/v2"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 
 	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
@@ -25,6 +30,33 @@ import (
 	"github.com/t1bur1an/pgtrace-ebpf/internal/sqlcomment"
 )
 
+// DefaultMaxQueryText is the default db.query.text cap in bytes.
+const DefaultMaxQueryText = 2048
+
+// Hooks observe the export pipeline (all optional).
+type Hooks struct {
+	Created  func(n int) // n spans were encoded
+	Exported func(n int) // n spans were delivered
+	Failed   func(n int) // a batch of n spans failed
+	Dropped  func(n int) // n spans were dropped because the queue was full
+}
+
+// Config configures an Exporter.
+type Config struct {
+	Endpoint     string        // OTLP/HTTP traces URL
+	Service      string        // service.name
+	Workers      int           // concurrent encoders/senders (default 4)
+	BatchSpans   int           // spans per request (default 8192)
+	QueueTraces  int           // queued traces before dropping (default 65536)
+	Interval     time.Duration // flush a partial batch after this (default 1s)
+	MaxQueryText int           // db.query.text cap (DefaultMaxQueryText if 0)
+	OnTruncate   func()        // db.query.text was shortened
+	Hooks        Hooks
+	Client       *http.Client // default: keep-alive client with a 10 s timeout
+
+	clock func() (mono, wall int64) // tests
+}
+
 // Span is a kept query plus the connection it was seen on.
 type Span struct {
 	Q      pgwire.Query
@@ -32,106 +64,6 @@ type Span struct {
 	FD     int32
 	Remote netip.AddrPort
 	Reason sampler.Reason
-}
-
-type Exporter struct {
-	tp     *sdktrace.TracerProvider
-	tracer trace.Tracer
-	offset int64 // wall - monotonic, ns
-	opts   Options
-}
-
-// Options tune what goes into spans.
-type Options struct {
-	MaxQueryText int    // db.query.text length cap (DefaultMaxQueryText if 0)
-	OnTruncate   func() // called when db.query.text is shortened
-	Hooks        Hooks
-}
-
-// Hooks observe the export pipeline (all optional). Created and Exported
-// differ by spans still queued or dropped by the batch processor.
-type Hooks struct {
-	Created  func()      // a span was ended and handed to the processor
-	Exported func(n int) // n spans were delivered
-	Failed   func()      // an export batch failed
-}
-
-// countingExporter reports delivered spans and failed batches.
-type countingExporter struct {
-	sdktrace.SpanExporter
-	hooks Hooks
-}
-
-func counting(next sdktrace.SpanExporter, h Hooks) sdktrace.SpanExporter {
-	return countingExporter{next, h}
-}
-
-func (c countingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	err := c.SpanExporter.ExportSpans(ctx, spans)
-	switch {
-	case err != nil && c.hooks.Failed != nil:
-		c.hooks.Failed()
-	case err == nil && c.hooks.Exported != nil:
-		c.hooks.Exported(len(spans))
-	}
-	return err
-}
-
-// DefaultMaxQueryText is the default db.query.text cap in bytes.
-const DefaultMaxQueryText = 2048
-
-// SetOptions must be called before exporting. Its Hooks.Created is used;
-// Exported/Failed are wired through New.
-func (e *Exporter) SetOptions(o Options) {
-	if o.MaxQueryText <= 0 {
-		o.MaxQueryText = DefaultMaxQueryText
-	}
-	e.opts = o
-}
-
-// New exports over OTLP/HTTP to endpoint, a full URL such as
-// http://victoriatraces:10428/insert/opentelemetry/v1/traces.
-func New(ctx context.Context, endpoint, service string, hooks Hooks) (*Exporter, error) {
-	otlp, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
-	if err != nil {
-		return nil, fmt.Errorf("otlp exporter: %w", err)
-	}
-	sx := counting(otlp, hooks)
-	// The batch processor drops spans when its queue is full instead of
-	// blocking, so a slow collector never stalls capture.
-	bsp := sdktrace.NewBatchSpanProcessor(sx,
-		sdktrace.WithMaxQueueSize(65536),
-		sdktrace.WithMaxExportBatchSize(2048),
-		sdktrace.WithBatchTimeout(2*time.Second))
-	return build(bsp, service, clocks), nil
-}
-
-func newWithSpanExporter(sx sdktrace.SpanExporter, service string, clock func() (mono, wall int64)) *Exporter {
-	return build(sdktrace.NewSimpleSpanProcessor(sx), service, clock)
-}
-
-func build(sp sdktrace.SpanProcessor, service string, clock func() (mono, wall int64)) *Exporter {
-	res := resource.NewSchemaless(attribute.String("service.name", service))
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(sp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()), // sampling is done upstream
-	)
-	mono, wall := clock()
-	return &Exporter{tp: tp, tracer: tp.Tracer("github.com/t1bur1an/pgtrace-ebpf"), offset: wall - mono,
-		opts: Options{MaxQueryText: DefaultMaxQueryText}}
-}
-
-func clocks() (mono, wall int64) {
-	var ts unix.Timespec
-	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
-	return ts.Nano(), time.Now().UnixNano()
-}
-
-func (e *Exporter) wall(mono uint64) time.Time { return time.Unix(0, int64(mono)+e.offset) }
-
-func (e *Exporter) Export(s Span) {
-	e.span(context.Background(), trace.SpanKindClient, s.Q, e.serverAttrs(s))
 }
 
 // ClientInfo describes the client connection of a trace's root query.
@@ -159,98 +91,419 @@ type ConnError struct {
 	Params        map[string]string // client startup parameters, if seen
 }
 
-// ExportConnError exports a connection error as a "connect" span.
-func (e *Exporter) ExportConnError(c ConnError) {
-	kind := trace.SpanKindClient
-	attrs := []attribute.KeyValue{
-		attribute.String("db.system", "postgresql"),
-		attribute.String("db.system.name", "postgresql"),
-		attribute.Bool("pgtrace.connection_error", true),
-		attribute.String("db.response.status_code", clean(c.Code, 16)),
-		attribute.Int64("pgbouncer.pid", int64(c.Key.PID)),
-		attribute.String("pgtrace.sample_reason", string(sampler.ReasonError)),
-	}
-	addrKey, portKey, fdKey := "server.address", "server.port", "pgbouncer.server_fd"
-	if c.Client {
-		kind = trace.SpanKindServer
-		addrKey, portKey, fdKey = "client.address", "client.port", "pgbouncer.client_fd"
-	}
-	attrs = append(attrs, attribute.Int64(fdKey, int64(c.Key.FD)))
-	if c.Addr.IsValid() {
-		attrs = append(attrs, attribute.String(addrKey, c.Addr.Addr().String()), attribute.Int(portKey, int(c.Addr.Port())))
-	}
-	for key, attr := range map[string]string{"database": "db.namespace", "user": "db.user", "application_name": "application_name"} {
-		if v := c.Params[key]; v != "" {
-			attrs = append(attrs, attribute.String(attr, clean(v, 256)))
-		}
-	}
-	start := c.Start
-	if start == 0 || start > c.End {
-		start = c.End
-	}
-	e.span(context.Background(), kind, pgwire.Query{Start: start, End: c.End, Operation: "connect",
-		ErrorCode: c.Code, ErrorMessage: c.Message}, attrs)
+type jobKind uint8
+
+const (
+	jobTrace jobKind = iota
+	jobSpan
+	jobConnError
+)
+
+type job struct {
+	kind    jobKind
+	trace   correlate.Trace
+	reason  sampler.Reason
+	client  ClientInfo
+	servers []netip.AddrPort // address of each trace.Server entry
+	span    Span
+	connErr ConnError
 }
 
-// ExportTrace exports a client query as a SERVER span (pgbouncer serving the
-// client) with its server queries as CLIENT child spans. Traces without a
-// client query export each server query as its own trace.
-func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
-	child := func(ctx context.Context, sq correlate.ServerQuery) {
-		attrs := append(e.serverAttrs(Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: server(sq.Key), Reason: reason}),
-			attribute.String("pgtrace.correlation", sq.Correlation),
-			attribute.Bool("pgbouncer.internal", sq.Internal))
-		e.span(ctx, trace.SpanKindClient, sq.Q, attrs)
+func (j *job) spans() int {
+	switch j.kind {
+	case jobTrace:
+		n := len(j.trace.Server)
+		if j.trace.Client != nil {
+			n++
+		}
+		return n
+	default:
+		return 1
 	}
-	if t.Client == nil {
-		for _, sq := range t.Server {
-			child(context.Background(), sq)
+}
+
+type Exporter struct {
+	cfg    Config
+	env    envelope
+	offset int64 // wall - monotonic, ns
+	jobs   chan job
+	wg     sync.WaitGroup
+	mu     sync.RWMutex // held for reading while sending on jobs; Shutdown closes it
+	closed bool
+}
+
+// New starts the export workers.
+func New(cfg Config) (*Exporter, error) {
+	if cfg.Endpoint == "" {
+		return nil, fmt.Errorf("export: empty endpoint")
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+	if cfg.BatchSpans <= 0 {
+		cfg.BatchSpans = 8192
+	}
+	if cfg.QueueTraces <= 0 {
+		cfg.QueueTraces = 65536
+	}
+	if cfg.Interval <= 0 {
+		cfg.Interval = time.Second
+	}
+	if cfg.MaxQueryText <= 0 {
+		cfg.MaxQueryText = DefaultMaxQueryText
+	}
+	if cfg.Client == nil {
+		cfg.Client = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+			MaxIdleConnsPerHost: cfg.Workers, IdleConnTimeout: 90 * time.Second}}
+	}
+	if cfg.clock == nil {
+		cfg.clock = clocks
+	}
+	mono, wall := cfg.clock()
+	e := &Exporter{cfg: cfg, env: newEnvelope(cfg.Service), offset: wall - mono, jobs: make(chan job, cfg.QueueTraces)}
+	for i := 0; i < cfg.Workers; i++ {
+		e.wg.Add(1)
+		go e.worker(uint64(i))
+	}
+	return e, nil
+}
+
+func clocks() (mono, wall int64) {
+	var ts unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
+	return ts.Nano(), time.Now().UnixNano()
+}
+
+// QueueLen is the number of traces waiting for a worker.
+func (e *Exporter) QueueLen() int { return len(e.jobs) }
+
+func (e *Exporter) enqueue(j job) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.closed {
+		return
+	}
+	select {
+	case e.jobs <- j:
+	default:
+		if h := e.cfg.Hooks.Dropped; h != nil {
+			h(j.spans())
+		}
+	}
+}
+
+// Export queues a single server-side span (no client query).
+func (e *Exporter) Export(s Span) { e.enqueue(job{kind: jobSpan, span: s}) }
+
+// ExportConnError queues a connection error as a "connect" span.
+func (e *Exporter) ExportConnError(c ConnError) {
+	c.Params = copyParams(c.Params)
+	e.enqueue(job{kind: jobConnError, connErr: c})
+}
+
+// ExportTrace queues a client query (SERVER span) with its server queries
+// (CLIENT children). Traces without a client query export each server query
+// as its own trace. server is resolved now, on the caller's goroutine.
+func (e *Exporter) ExportTrace(t correlate.Trace, reason sampler.Reason, client ClientInfo, server func(event.ConnKey) netip.AddrPort) {
+	addrs := make([]netip.AddrPort, len(t.Server))
+	for i, sq := range t.Server {
+		addrs[i] = server(sq.Key)
+	}
+	client.Params = copyParams(client.Params)
+	e.enqueue(job{kind: jobTrace, trace: t, reason: reason, client: client, servers: addrs})
+}
+
+func copyParams(p map[string]string) map[string]string {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(p))
+	for k, v := range p {
+		out[k] = v
+	}
+	return out
+}
+
+// Shutdown stops accepting work, lets the workers send what is queued and
+// waits for them (or ctx).
+func (e *Exporter) Shutdown(ctx context.Context) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.closed = true
+	close(e.jobs)
+	e.mu.Unlock()
+	done := make(chan struct{})
+	go func() { e.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// worker encodes jobs into batches and sends them.
+type worker struct {
+	e     *Exporter
+	rng   *rand.Rand
+	spans []byte // encoded spans of the current batch
+	n     int    // spans in the batch
+	a     attrs
+	req   []byte
+}
+
+func (e *Exporter) worker(id uint64) {
+	defer e.wg.Done()
+	w := &worker{e: e, rng: rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), id))}
+	tick := time.NewTicker(e.cfg.Interval)
+	defer tick.Stop()
+	for {
+		select {
+		case j, ok := <-e.jobs:
+			if !ok {
+				w.flush()
+				return
+			}
+			w.encode(&j)
+			if w.n >= e.cfg.BatchSpans {
+				w.flush()
+			}
+		case <-tick.C:
+			w.flush()
+		}
+	}
+}
+
+func (w *worker) flush() {
+	if w.n == 0 {
+		return
+	}
+	n := w.n
+	w.req = w.e.env.request(w.req, w.spans)
+	w.spans, w.n = w.spans[:0], 0
+	h := w.e.cfg.Hooks
+	if err := w.post(); err != nil {
+		if h.Failed != nil {
+			h.Failed(n)
 		}
 		return
 	}
+	if h.Exported != nil {
+		h.Exported(n)
+	}
+}
 
+func (w *worker) post() error {
+	req, err := http.NewRequest(http.MethodPost, w.e.cfg.Endpoint, bytes.NewReader(w.req))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	resp, err := w.e.cfg.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("otlp export: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (w *worker) ids() (t [16]byte, s [8]byte) {
+	for i := 0; i < 16; i += 8 {
+		putU64(t[i:], w.rng.Uint64())
+	}
+	for {
+		putU64(s[:], w.rng.Uint64())
+		if s != ([8]byte{}) {
+			return
+		}
+	}
+}
+
+func (w *worker) spanID() (s [8]byte) {
+	_, s = w.ids()
+	return
+}
+
+func newRNG() *rand.Rand { return rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)) }
+
+func putU64(b []byte, v uint64) {
+	for i := 0; i < 8; i++ {
+		b[i] = byte(v >> (56 - 8*i))
+	}
+}
+
+func (w *worker) wall(mono uint64) uint64 { return uint64(int64(mono) + w.e.offset) }
+
+func (w *worker) add(s *spanData) {
+	w.spans = appendSpan(w.spans, s)
+	w.n++
+	if h := w.e.cfg.Hooks.Created; h != nil {
+		h(1)
+	}
+}
+
+func (w *worker) encode(j *job) {
+	switch j.kind {
+	case jobSpan:
+		tid, sid := w.ids()
+		w.serverSpan(tid, sid, [8]byte{}, j.span, "", false, false)
+	case jobConnError:
+		w.connError(&j.connErr)
+	case jobTrace:
+		w.trace(j)
+	}
+}
+
+func (w *worker) trace(j *job) {
+	t := j.trace
+	child := func(tid [16]byte, parent [8]byte, i int) {
+		sq := t.Server[i]
+		w.serverSpan(tid, w.spanID(), parent,
+			Span{Q: sq.Q, PID: sq.Key.PID, FD: sq.Key.FD, Remote: j.servers[i], Reason: j.reason},
+			sq.Correlation, sq.Internal, true)
+	}
+	if t.Client == nil {
+		for i := range t.Server {
+			tid, _ := w.ids()
+			child(tid, [8]byte{}, i)
+		}
+		return
+	}
 	q := t.Client.Q
+	tid, root := w.ids()
+	var parent [8]byte
+	var traceState string
+	remote := false
+	if j.client.UseParent {
+		if ptid, psid, ok := parseTraceparent(j.client.Comment.TraceParent); ok && j.client.Comment.Valid {
+			tid, parent, traceState, remote = ptid, psid, j.client.Comment.TraceState, true
+		}
+	}
 	corr := correlate.None
 	if len(t.Server) > 0 {
 		corr = t.Server[0].Correlation
 	}
-	attrs := append(e.queryAttrs(q, reason),
-		attribute.Int64("pgbouncer.pid", int64(t.Client.Key.PID)),
-		attribute.Int64("pgbouncer.client_fd", int64(t.Client.Key.FD)),
-		attribute.String("pgtrace.correlation", corr))
-	if client.Addr.IsValid() {
-		attrs = append(attrs,
-			attribute.String("client.address", client.Addr.Addr().String()),
-			attribute.Int("client.port", int(client.Addr.Port())))
+	a := &w.a
+	a.b = a.b[:0]
+	w.queryAttrs(q, j.reason)
+	a.i64("pgbouncer.pid", int64(t.Client.Key.PID))
+	a.i64("pgbouncer.client_fd", int64(t.Client.Key.FD))
+	a.str("pgtrace.correlation", corr)
+	if j.client.Addr.IsValid() {
+		a.str("client.address", j.client.Addr.Addr().String())
+		a.i64("client.port", int64(j.client.Addr.Port()))
 	}
-	for key, attr := range map[string]string{"database": "db.namespace", "user": "db.user", "application_name": "application_name"} {
-		if v := client.Params[key]; v != "" {
-			attrs = append(attrs, attribute.String(attr, clean(v, 256)))
-		}
-	}
-	if client.IdleInTx > 0 {
-		attrs = append(attrs, attribute.Float64("pgbouncer.idle_in_tx_ms", float64(client.IdleInTx)/1e6))
+	w.clientParams(j.client.Params)
+	if j.client.IdleInTx > 0 {
+		a.f64("pgbouncer.idle_in_tx_ms", float64(j.client.IdleInTx)/1e6)
 	}
 	// Pool wait ends when pgbouncer first talks to the server it was given,
 	// which may be an internal parameter sync before the forwarded query.
 	if len(t.Server) > 0 && t.Server[0].Q.Start >= q.Start {
-		attrs = append(attrs, attribute.Float64("pgbouncer.pool_wait_ms", float64(t.Server[0].Q.Start-q.Start)/1e6))
+		a.f64("pgbouncer.pool_wait_ms", float64(t.Server[0].Q.Start-q.Start)/1e6)
 	}
-	for k, v := range client.Comment.Attrs {
-		attrs = append(attrs, attribute.String("sqlcommenter."+k, v))
+	for k, v := range j.client.Comment.Attrs {
+		a.str("sqlcommenter."+k, v)
 	}
-	ctx := context.Background()
-	if client.UseParent {
-		if sc, ok := remoteParent(client.Comment); ok {
-			ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-			attrs = append(attrs, attribute.String("pgtrace.trace_context", "sqlcommenter"))
+	if remote {
+		a.str("pgtrace.trace_context", "sqlcommenter")
+	}
+	w.add(&spanData{traceID: tid, spanID: root, parentID: parent, traceState: traceState,
+		name: spanName(q), kind: kindServer, start: w.wall(q.Start), end: w.wall(q.End),
+		attrs: a.b, failed: q.ErrorCode != "", errMsg: clean(q.ErrorMessage, DefaultMaxQueryText)})
+	for i := range t.Server {
+		child(tid, root, i)
+	}
+}
+
+func (w *worker) serverSpan(tid [16]byte, sid, parent [8]byte, s Span, correlation string, internal, correlated bool) {
+	a := &w.a
+	a.b = a.b[:0]
+	w.queryAttrs(s.Q, s.Reason)
+	a.i64("pgbouncer.pid", int64(s.PID))
+	a.i64("pgbouncer.server_fd", int64(s.FD))
+	if s.Remote.IsValid() {
+		a.str("server.address", s.Remote.Addr().String())
+		a.i64("server.port", int64(s.Remote.Port()))
+	}
+	if correlated {
+		a.str("pgtrace.correlation", correlation)
+		a.boolean("pgbouncer.internal", internal)
+	}
+	w.add(&spanData{traceID: tid, spanID: sid, parentID: parent, name: spanName(s.Q), kind: kindClient,
+		start: w.wall(s.Q.Start), end: w.wall(s.Q.End), attrs: a.b,
+		failed: s.Q.ErrorCode != "", errMsg: clean(s.Q.ErrorMessage, DefaultMaxQueryText)})
+}
+
+func (w *worker) connError(c *ConnError) {
+	a := &w.a
+	a.b = a.b[:0]
+	a.str("db.system", "postgresql")
+	a.str("db.system.name", "postgresql")
+	a.boolean("pgtrace.connection_error", true)
+	a.str("db.response.status_code", clean(c.Code, 16))
+	a.i64("pgbouncer.pid", int64(c.Key.PID))
+	a.str("pgtrace.sample_reason", string(sampler.ReasonError))
+	kind, addrKey, portKey, fdKey := uint64(kindClient), "server.address", "server.port", "pgbouncer.server_fd"
+	if c.Client {
+		kind, addrKey, portKey, fdKey = kindServer, "client.address", "client.port", "pgbouncer.client_fd"
+	}
+	a.i64(fdKey, int64(c.Key.FD))
+	if c.Addr.IsValid() {
+		a.str(addrKey, c.Addr.Addr().String())
+		a.i64(portKey, int64(c.Addr.Port()))
+	}
+	w.clientParams(c.Params)
+	start := c.Start
+	if start == 0 || start > c.End {
+		start = c.End
+	}
+	tid, sid := w.ids()
+	w.add(&spanData{traceID: tid, spanID: sid, name: "connect", kind: kind, start: w.wall(start), end: w.wall(c.End),
+		attrs: a.b, failed: true, errMsg: clean(c.Message, DefaultMaxQueryText)})
+}
+
+func (w *worker) clientParams(p map[string]string) {
+	for _, pa := range [...][2]string{{"database", "db.namespace"}, {"user", "db.user"}, {"application_name", "application_name"}} {
+		if v := p[pa[0]]; v != "" {
+			w.a.str(pa[1], clean(v, 256))
 		}
 	}
-	ctx, end := e.start(ctx, trace.SpanKindServer, q, attrs)
-	for _, sq := range t.Server {
-		child(ctx, sq)
+}
+
+// queryAttrs appends the attributes shared by client and server query spans.
+func (w *worker) queryAttrs(q pgwire.Query, reason sampler.Reason) {
+	max := w.e.cfg.MaxQueryText
+	if len(q.SQL) > max && w.e.cfg.OnTruncate != nil {
+		w.e.cfg.OnTruncate()
 	}
-	end()
+	a := &w.a
+	a.str("db.system", "postgresql")
+	a.str("db.system.name", "postgresql")
+	a.str("db.query.text", clean(q.SQL, max))
+	a.str("db.operation.name", q.Operation)
+	a.i64("db.response.returned_rows", q.Rows)
+	a.str("pgtrace.protocol", q.Protocol)
+	a.str("pgtrace.command_tag", clean(q.CommandTag, 256))
+	a.boolean("pgtrace.truncated", q.Truncated)
+	a.str("pgtrace.sample_reason", string(reason))
+	if q.ErrorCode != "" {
+		a.str("db.response.status_code", clean(q.ErrorCode, 16))
+	}
+}
+
+func spanName(q pgwire.Query) string {
+	if q.Operation == "" {
+		return "query"
+	}
+	return q.Operation
 }
 
 // clean makes wire text safe for OTLP: at most max bytes, cut on a rune
@@ -264,7 +517,7 @@ func clean(s string, max int) string {
 		}
 		s = s[:cut]
 	}
-	return strings.ToValidUTF8(s, "\uFFFD")
+	return strings.ToValidUTF8(s, "�")
 }
 
 // Sampled reports whether a valid traceparent has the sampled flag set.
@@ -275,89 +528,3 @@ func Sampled(c sqlcomment.Comment) bool {
 	f, err := strconv.ParseUint(c.TraceParent[len(c.TraceParent)-2:], 16, 8)
 	return err == nil && f&1 == 1
 }
-
-// remoteParent turns a validated traceparent into the span context of the
-// application span the query ran under.
-func remoteParent(c sqlcomment.Comment) (trace.SpanContext, bool) {
-	if !c.Valid {
-		return trace.SpanContext{}, false
-	}
-	p := strings.Split(c.TraceParent, "-")
-	tid, err1 := trace.TraceIDFromHex(p[1])
-	sid, err2 := trace.SpanIDFromHex(p[2])
-	if err1 != nil || err2 != nil {
-		return trace.SpanContext{}, false
-	}
-	flags := trace.TraceFlags(0)
-	if Sampled(c) {
-		flags = trace.FlagsSampled
-	}
-	cfg := trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: flags, Remote: true}
-	if ts, err := trace.ParseTraceState(c.TraceState); err == nil {
-		cfg.TraceState = ts
-	}
-	return trace.NewSpanContext(cfg), true
-}
-
-// queryAttrs are the attributes shared by client and server query spans.
-func (e *Exporter) queryAttrs(q pgwire.Query, reason sampler.Reason) []attribute.KeyValue {
-	text := clean(q.SQL, e.opts.MaxQueryText)
-	if len(q.SQL) > e.opts.MaxQueryText && e.opts.OnTruncate != nil {
-		e.opts.OnTruncate()
-	}
-	attrs := []attribute.KeyValue{
-		attribute.String("db.system", "postgresql"),
-		attribute.String("db.system.name", "postgresql"),
-		attribute.String("db.query.text", text),
-		attribute.String("db.operation.name", q.Operation),
-		attribute.Int64("db.response.returned_rows", q.Rows),
-		attribute.String("pgtrace.protocol", q.Protocol),
-		attribute.String("pgtrace.command_tag", clean(q.CommandTag, 256)),
-		attribute.Bool("pgtrace.truncated", q.Truncated),
-		attribute.String("pgtrace.sample_reason", string(reason)),
-	}
-	if q.ErrorCode != "" {
-		attrs = append(attrs, attribute.String("db.response.status_code", clean(q.ErrorCode, 16)))
-	}
-	return attrs
-}
-
-func (e *Exporter) serverAttrs(s Span) []attribute.KeyValue {
-	attrs := append(e.queryAttrs(s.Q, s.Reason),
-		attribute.Int64("pgbouncer.pid", int64(s.PID)),
-		attribute.Int64("pgbouncer.server_fd", int64(s.FD)))
-	if s.Remote.IsValid() {
-		attrs = append(attrs,
-			attribute.String("server.address", s.Remote.Addr().String()),
-			attribute.Int("server.port", int(s.Remote.Port())))
-	}
-	return attrs
-}
-
-// start opens a span for q and returns its context and a func ending it.
-func (e *Exporter) start(ctx context.Context, kind trace.SpanKind, q pgwire.Query, attrs []attribute.KeyValue) (context.Context, func()) {
-	name := q.Operation
-	if name == "" {
-		name = "query"
-	}
-	ctx, span := e.tracer.Start(ctx, name,
-		trace.WithSpanKind(kind),
-		trace.WithTimestamp(e.wall(q.Start)),
-		trace.WithAttributes(attrs...))
-	if q.ErrorCode != "" {
-		span.SetStatus(codes.Error, clean(q.ErrorMessage, DefaultMaxQueryText))
-	}
-	return ctx, func() {
-		span.End(trace.WithTimestamp(e.wall(q.End)))
-		if e.opts.Hooks.Created != nil {
-			e.opts.Hooks.Created()
-		}
-	}
-}
-
-func (e *Exporter) span(ctx context.Context, kind trace.SpanKind, q pgwire.Query, attrs []attribute.KeyValue) {
-	_, end := e.start(ctx, kind, q, attrs)
-	end()
-}
-
-func (e *Exporter) Shutdown(ctx context.Context) error { return e.tp.Shutdown(ctx) }

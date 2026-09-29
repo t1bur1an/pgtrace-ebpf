@@ -145,7 +145,7 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 		}, []string{"side"}),
 		exportSpans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pgtrace_export_spans_total",
-			Help: "Spans through the exporter by stage: created, exported (delivered), failed_batches. created - exported = queued or dropped.",
+			Help: "Spans through the exporter by stage: created (encoded), exported (delivered), dropped (queue full), and failed_batches (batches, not spans). created - exported = spans in unsent or failed batches.",
 		}, []string{"stage"}),
 		resyncs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pgtrace_parser_resyncs_total",
@@ -217,7 +217,7 @@ func MaxSeries(cfg Config) int {
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
 		2*(maxSQLStates+1) + // connection_errors_total: side × sqlstate
 		h + h + // pool_wait_seconds, idle_in_transaction_seconds
-		5 + 5 + 4 + 3 + 3 + 5 + 2 + 3 + 4 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, capture_gaps(+bytes), connections, traced_processes
+		5 + 5 + 4 + 3 + 3 + 5 + 2 + 4 + 1 + 4 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, export_queue_length, capture_gaps(+bytes), connections, traced_processes
 		1 + 2 + 5 // kernel drops, bpf run time/runs, recursion misses per program
 	if len(cfg.Labels) > 0 {
 		n += (cfg.Limit+1)*SeriesPerLabelSet + 2 // +1 for 'other'; label_sets, overflow
@@ -361,10 +361,22 @@ func (m *Metrics) ConnectionError(side, code string) {
 func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
 func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
 
-// ExportHooks feed pgtrace_export_spans_total.
-func (m *Metrics) ExportHooks() (created func(), exported func(int), failed func()) {
-	c, e, f := m.exportSpans.WithLabelValues("created"), m.exportSpans.WithLabelValues("exported"), m.exportSpans.WithLabelValues("failed_batches")
-	return c.Inc, func(n int) { e.Add(float64(n)) }, f.Inc
+// ExportHooks feed pgtrace_export_spans_total. Each takes a span count;
+// failed counts one failed batch whatever its size.
+func (m *Metrics) ExportHooks() (created, exported, failed, dropped func(n int)) {
+	add := func(stage string) func(int) {
+		c := m.exportSpans.WithLabelValues(stage)
+		return func(n int) { c.Add(float64(n)) }
+	}
+	f := m.exportSpans.WithLabelValues("failed_batches")
+	return add("created"), add("exported"), func(int) { f.Inc() }, add("dropped")
+}
+
+// RegisterExportQueue exposes the exporter's queue length, read on scrape.
+func (m *Metrics) RegisterExportQueue(n func() int) {
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "pgtrace_export_queue_length", Help: "Traces waiting for an export worker.",
+	}, func() float64 { return float64(n()) }))
 }
 
 // CaptureGap counts a skipped stretch of n bytes on side client/server.

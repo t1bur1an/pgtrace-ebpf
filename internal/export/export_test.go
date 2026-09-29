@@ -2,18 +2,22 @@ package export
 
 import (
 	"context"
-	"errors"
+	"encoding/hex"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
+	coltrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
 	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
@@ -27,23 +31,116 @@ const (
 	wallNow = int64(1_700_000_000_000_000_000)
 )
 
-func newTest(t *testing.T) (*Exporter, *tracetest.InMemoryExporter) {
-	mem := tracetest.NewInMemoryExporter()
-	e := newWithSpanExporter(mem, "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
-	t.Cleanup(func() { e.Shutdown(context.Background()) })
-	return e, mem
+// collector is an OTLP/HTTP endpoint that decodes requests with the
+// official protobuf types.
+type collector struct {
+	mu       sync.Mutex
+	reqs     []*coltrace.ExportTraceServiceRequest
+	fail     atomic.Bool
+	inflight atomic.Int32
+	maxIn    atomic.Int32
+	delay    time.Duration
 }
 
-func attrs(kv []attribute.KeyValue) map[string]attribute.Value {
-	m := map[string]attribute.Value{}
-	for _, a := range kv {
-		m[string(a.Key)] = a.Value
+func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	n := c.inflight.Add(1)
+	defer c.inflight.Add(-1)
+	for {
+		m := c.maxIn.Load()
+		if n <= m || c.maxIn.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(c.delay)
+	body, _ := io.ReadAll(r.Body)
+	if c.fail.Load() {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+		return
+	}
+	var req coltrace.ExportTraceServiceRequest
+	if err := proto.Unmarshal(body, &req); err != nil || r.Header.Get("Content-Type") != "application/x-protobuf" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	c.reqs = append(c.reqs, &req)
+	c.mu.Unlock()
+}
+
+type decoded struct {
+	*tracepb.Span
+	resource map[string]string
+	scope    string
+}
+
+func (c *collector) spans() []decoded {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []decoded
+	for _, req := range c.reqs {
+		for _, rs := range req.ResourceSpans {
+			res := map[string]string{}
+			for _, kv := range rs.Resource.Attributes {
+				res[kv.Key] = kv.Value.GetStringValue()
+			}
+			for _, ss := range rs.ScopeSpans {
+				for _, s := range ss.Spans {
+					out = append(out, decoded{s, res, ss.Scope.GetName()})
+				}
+			}
+		}
+	}
+	return out
+}
+
+func spanAttrs(s *tracepb.Span) map[string]*commonpb.AnyValue {
+	m := map[string]*commonpb.AnyValue{}
+	for _, kv := range s.Attributes {
+		m[kv.Key] = kv.Value
 	}
 	return m
 }
 
+type counts struct{ created, exported, failed, dropped atomic.Int64 }
+
+func (c *counts) hooks() Hooks {
+	return Hooks{
+		Created:  func(n int) { c.created.Add(int64(n)) },
+		Exported: func(n int) { c.exported.Add(int64(n)) },
+		Failed:   func(n int) { c.failed.Add(int64(n)) },
+		Dropped:  func(n int) { c.dropped.Add(int64(n)) },
+	}
+}
+
+func newTest(t *testing.T, mod func(*Config)) (*Exporter, *collector, *counts) {
+	t.Helper()
+	col := &collector{}
+	srv := httptest.NewServer(col)
+	t.Cleanup(srv.Close)
+	cnt := &counts{}
+	cfg := Config{Endpoint: srv.URL, Service: "pgbouncer", Hooks: cnt.hooks(), Workers: 1, Interval: 50 * time.Millisecond,
+		clock: func() (int64, int64) { return monoNow, wallNow }}
+	if mod != nil {
+		mod(&cfg)
+	}
+	e, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e, col, cnt
+}
+
+func drain(t *testing.T, e *Exporter) {
+	t.Helper()
+	if err := e.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func noAddr(event.ConnKey) netip.AddrPort { return netip.AddrPort{} }
+
 func TestExportSpan(t *testing.T) {
-	e, mem := newTest(t)
+	e, col, _ := newTest(t, nil)
 	e.Export(Span{
 		Q: pgwire.Query{
 			Start: uint64(monoNow - 5_000_000), End: uint64(monoNow - 1_000_000),
@@ -51,66 +148,57 @@ func TestExportSpan(t *testing.T) {
 		},
 		PID: 42, FD: 7, Remote: netip.MustParseAddrPort("10.0.0.2:5432"), Reason: sampler.ReasonRatio,
 	})
-	spans := mem.GetSpans()
+	drain(t, e)
+	spans := col.spans()
 	if len(spans) != 1 {
 		t.Fatalf("got %d spans", len(spans))
 	}
 	s := spans[0]
-	if s.Name != "SELECT" || s.SpanKind != trace.SpanKindClient {
-		t.Fatalf("name/kind %q %v", s.Name, s.SpanKind)
+	if s.Name != "SELECT" || s.Kind != tracepb.Span_SPAN_KIND_CLIENT {
+		t.Fatalf("name/kind %q %v", s.Name, s.Kind)
 	}
-	if want := time.Unix(0, wallNow-5_000_000); !s.StartTime.Equal(want) {
-		t.Fatalf("start %v want %v", s.StartTime, want)
+	if s.StartTimeUnixNano != uint64(wallNow-5_000_000) || s.EndTimeUnixNano != uint64(wallNow-1_000_000) {
+		t.Fatalf("times %d %d", s.StartTimeUnixNano, s.EndTimeUnixNano)
 	}
-	if want := time.Unix(0, wallNow-1_000_000); !s.EndTime.Equal(want) {
-		t.Fatalf("end %v want %v", s.EndTime, want)
+	if len(s.TraceId) != 16 || len(s.SpanId) != 8 || len(s.ParentSpanId) != 0 {
+		t.Fatalf("ids %x %x %x", s.TraceId, s.SpanId, s.ParentSpanId)
 	}
-	a := attrs(s.Attributes)
-	checks := map[string]string{
-		"db.system":             "postgresql",
-		"db.system.name":        "postgresql",
-		"db.query.text":         "select * from t",
-		"db.operation.name":     "SELECT",
-		"server.address":        "10.0.0.2",
-		"pgtrace.protocol":      "extended",
-		"pgtrace.sample_reason": "ratio",
-		"pgtrace.command_tag":   "SELECT 3",
-	}
-	for k, v := range checks {
-		if a[k].AsString() != v {
-			t.Errorf("%s = %q want %q", k, a[k].AsString(), v)
+	a := spanAttrs(s.Span)
+	for k, v := range map[string]string{
+		"db.system": "postgresql", "db.system.name": "postgresql", "db.query.text": "select * from t",
+		"db.operation.name": "SELECT", "server.address": "10.0.0.2", "pgtrace.protocol": "extended",
+		"pgtrace.sample_reason": "ratio", "pgtrace.command_tag": "SELECT 3",
+	} {
+		if a[k].GetStringValue() != v {
+			t.Errorf("%s = %q want %q", k, a[k].GetStringValue(), v)
 		}
 	}
-	if a["server.port"].AsInt64() != 5432 || a["db.response.returned_rows"].AsInt64() != 3 ||
-		a["pgbouncer.pid"].AsInt64() != 42 || a["pgbouncer.server_fd"].AsInt64() != 7 {
+	if a["server.port"].GetIntValue() != 5432 || a["db.response.returned_rows"].GetIntValue() != 3 ||
+		a["pgbouncer.pid"].GetIntValue() != 42 || a["pgbouncer.server_fd"].GetIntValue() != 7 {
 		t.Errorf("int attrs %v", a)
 	}
-	if s.Status.Code != codes.Unset {
+	if s.Status != nil && s.Status.Code == tracepb.Status_STATUS_CODE_ERROR {
 		t.Errorf("status %v", s.Status)
 	}
-	if s.Resource.Set().Len() == 0 {
-		t.Error("no resource")
-	}
-	if v, _ := s.Resource.Set().Value("service.name"); v.AsString() != "pgbouncer" {
-		t.Errorf("service.name %q", v.AsString())
+	if s.resource["service.name"] != "pgbouncer" || s.scope != scopeName {
+		t.Errorf("resource %v scope %q", s.resource, s.scope)
 	}
 }
 
 func TestExportErrorAndTruncation(t *testing.T) {
-	e, mem := newTest(t)
-	e.Export(Span{Q: pgwire.Query{
-		Start: uint64(monoNow), End: uint64(monoNow), SQL: strings.Repeat("x", 5000),
-		ErrorCode: "22012", ErrorMessage: "division by zero", Truncated: true,
-	}})
-	s := mem.GetSpans()[0]
-	if s.Status.Code != codes.Error || s.Status.Description != "division by zero" {
+	e, col, _ := newTest(t, nil)
+	e.Export(Span{Q: pgwire.Query{Start: uint64(monoNow), End: uint64(monoNow), SQL: strings.Repeat("x", 5000),
+		ErrorCode: "22012", ErrorMessage: "division by zero", Truncated: true}})
+	drain(t, e)
+	s := col.spans()[0]
+	if s.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR || s.Status.GetMessage() != "division by zero" {
 		t.Fatalf("status %+v", s.Status)
 	}
-	a := attrs(s.Attributes)
-	if n := len(a["db.query.text"].AsString()); n != DefaultMaxQueryText {
+	a := spanAttrs(s.Span)
+	if n := len(a["db.query.text"].GetStringValue()); n != DefaultMaxQueryText {
 		t.Fatalf("query text len %d", n)
 	}
-	if a["db.response.status_code"].AsString() != "22012" || !a["pgtrace.truncated"].AsBool() {
+	if a["db.response.status_code"].GetStringValue() != "22012" || !a["pgtrace.truncated"].GetBoolValue() {
 		t.Fatalf("attrs %v", a)
 	}
 	if s.Name != "query" {
@@ -119,7 +207,7 @@ func TestExportErrorAndTruncation(t *testing.T) {
 }
 
 func TestExportTrace(t *testing.T) {
-	e, mem := newTest(t)
+	e, col, _ := newTest(t, nil)
 	client := event.ConnKey{PID: 42, FD: 11}
 	server := event.ConnKey{PID: 42, FD: 7}
 	tr := correlate.Trace{
@@ -132,49 +220,50 @@ func TestExportTrace(t *testing.T) {
 			{Key: server, Correlation: "exact", Q: pgwire.Query{Start: uint64(monoNow - 6_000_000), End: uint64(monoNow - 2_000_000), SQL: "select 1", Operation: "SELECT", ErrorCode: "40001", ErrorMessage: "serialization"}},
 		},
 	}
-	info := ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "alice", "database": "shop", "application_name": "api"}}
+	info := ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "alice", "database": "shop", "application_name": "api"}, IdleInTx: 5 * time.Second}
 	e.ExportTrace(tr, sampler.ReasonError, info, func(event.ConnKey) netip.AddrPort { return netip.MustParseAddrPort("10.0.0.2:5432") })
-
-	spans := mem.GetSpans()
+	drain(t, e)
+	spans := col.spans()
 	if len(spans) != 3 {
 		t.Fatalf("got %d spans", len(spans))
 	}
-	var root tracetest.SpanStub
-	var children []tracetest.SpanStub
+	var root decoded
+	var children []decoded
 	for _, s := range spans {
-		if s.SpanKind == trace.SpanKindServer {
+		if s.Kind == tracepb.Span_SPAN_KIND_SERVER {
 			root = s
 		} else {
 			children = append(children, s)
 		}
 	}
 	for _, c := range children {
-		if c.Parent.SpanID() != root.SpanContext.SpanID() || c.SpanContext.TraceID() != root.SpanContext.TraceID() {
-			t.Fatalf("child not under root: %+v", c.Parent)
+		if string(c.ParentSpanId) != string(root.SpanId) || string(c.TraceId) != string(root.TraceId) {
+			t.Fatalf("child not under root")
 		}
 	}
-	ra := attrs(root.Attributes)
-	if ra["client.address"].AsString() != "10.0.0.9" || ra["client.port"].AsInt64() != 40000 ||
-		ra["db.namespace"].AsString() != "shop" || ra["db.user"].AsString() != "alice" || ra["application_name"].AsString() != "api" ||
-		ra["pgbouncer.client_fd"].AsInt64() != 11 || ra["pgtrace.correlation"].AsString() != "exact" {
+	ra := spanAttrs(root.Span)
+	if ra["client.address"].GetStringValue() != "10.0.0.9" || ra["client.port"].GetIntValue() != 40000 ||
+		ra["db.namespace"].GetStringValue() != "shop" || ra["db.user"].GetStringValue() != "alice" ||
+		ra["application_name"].GetStringValue() != "api" || ra["pgbouncer.client_fd"].GetIntValue() != 11 ||
+		ra["pgtrace.correlation"].GetStringValue() != "exact" || ra["pgbouncer.idle_in_tx_ms"].GetDoubleValue() != 5000 {
 		t.Fatalf("root attrs %v", ra)
 	}
-	if ra["pgbouncer.pool_wait_ms"].AsFloat64() != 2 {
+	if ra["pgbouncer.pool_wait_ms"].GetDoubleValue() != 2 {
 		t.Fatalf("pool wait %v", ra["pgbouncer.pool_wait_ms"])
 	}
-	if root.Name != "SELECT" || !root.StartTime.Equal(time.Unix(0, wallNow-10_000_000)) {
-		t.Fatalf("root %q %v", root.Name, root.StartTime)
+	if root.Name != "SELECT" || root.StartTimeUnixNano != uint64(wallNow-10_000_000) {
+		t.Fatalf("root %q %d", root.Name, root.StartTimeUnixNano)
 	}
 	var internal, failed int
 	for _, c := range children {
-		a := attrs(c.Attributes)
-		if a["pgbouncer.internal"].AsBool() {
+		a := spanAttrs(c.Span)
+		if a["pgbouncer.internal"].GetBoolValue() {
 			internal++
 		}
-		if c.Status.Code == codes.Error {
+		if c.Status.GetCode() == tracepb.Status_STATUS_CODE_ERROR {
 			failed++
 		}
-		if a["pgtrace.correlation"].AsString() != "exact" || a["server.port"].AsInt64() != 5432 {
+		if a["pgtrace.correlation"].GetStringValue() != "exact" || a["server.port"].GetIntValue() != 5432 {
 			t.Fatalf("child attrs %v", a)
 		}
 	}
@@ -184,54 +273,52 @@ func TestExportTrace(t *testing.T) {
 }
 
 func TestExportUncorrelated(t *testing.T) {
-	e, mem := newTest(t)
+	e, col, _ := newTest(t, nil)
 	tr := correlate.Trace{Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 7}, Correlation: "none", Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1", Operation: "SELECT"}}}}
-	e.ExportTrace(tr, sampler.ReasonRatio, ClientInfo{}, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
-	spans := mem.GetSpans()
-	if len(spans) != 1 || spans[0].SpanKind != trace.SpanKindClient || spans[0].Parent.IsValid() {
+	e.ExportTrace(tr, sampler.ReasonRatio, ClientInfo{}, noAddr)
+	drain(t, e)
+	spans := col.spans()
+	if len(spans) != 1 || spans[0].Kind != tracepb.Span_SPAN_KIND_CLIENT || len(spans[0].ParentSpanId) != 0 {
 		t.Fatalf("got %+v", spans)
 	}
-	if attrs(spans[0].Attributes)["pgtrace.correlation"].AsString() != "none" {
+	if spanAttrs(spans[0].Span)["pgtrace.correlation"].GetStringValue() != "none" {
 		t.Fatal("missing correlation attr")
 	}
 }
 
 func TestTruncatedTextIsValidUTF8(t *testing.T) {
-	e, mem := newTest(t)
-	// A multi-byte rune straddles the 2048-byte cut, and the captured SQL
-	// itself ends mid-rune (as when the parser truncates a long message).
-	sql := strings.Repeat("a", DefaultMaxQueryText-1) + "ж" + "tail"
-	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: sql}})
+	e, col, _ := newTest(t, nil)
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: strings.Repeat("a", DefaultMaxQueryText-1) + "ж" + "tail"}})
 	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select '" + string([]byte("жж")[:3])}})
-	for _, s := range mem.GetSpans() {
-		v := attrs(s.Attributes)["db.query.text"].AsString()
-		if !utf8.ValidString(v) {
-			t.Fatalf("invalid UTF-8 in db.query.text: %q", v[len(v)-4:])
+	drain(t, e)
+	for _, s := range col.spans() {
+		v := spanAttrs(s.Span)["db.query.text"].GetStringValue()
+		if !utf8.ValidString(v) || len(v) > DefaultMaxQueryText {
+			t.Fatalf("db.query.text %q", v)
 		}
-		if len(v) > DefaultMaxQueryText {
-			t.Fatalf("text longer than cap: %d", len(v))
-		}
+	}
+	if len(col.spans()) != 2 {
+		t.Fatal("a span with cut UTF-8 was rejected")
 	}
 }
 
 func TestMaxQueryTextOption(t *testing.T) {
-	mem := tracetest.NewInMemoryExporter()
 	cut := 0
-	e := newWithSpanExporter(mem, "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
-	e.SetOptions(Options{MaxQueryText: 100, OnTruncate: func() { cut++ }})
+	e, col, _ := newTest(t, func(c *Config) { c.MaxQueryText = 100; c.OnTruncate = func() { cut++ } })
 	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: strings.Repeat("s", 500)}})
 	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "short"}})
-	spans := mem.GetSpans()
-	if n := len(attrs(spans[0].Attributes)["db.query.text"].AsString()); n != 100 {
-		t.Fatalf("len %d", n)
+	drain(t, e)
+	lens := map[int]bool{}
+	for _, s := range col.spans() {
+		lens[len(spanAttrs(s.Span)["db.query.text"].GetStringValue())] = true
 	}
-	if cut != 1 {
-		t.Fatalf("truncation hook called %d times", cut)
+	if !lens[100] || cut != 1 {
+		t.Fatalf("lens %v cut %d", lens, cut)
 	}
 }
 
 func TestExportTraceWithRemoteParent(t *testing.T) {
-	e, mem := newTest(t)
+	e, col, _ := newTest(t, nil)
 	tr := correlate.Trace{
 		Client: &correlate.ClientQuery{Key: event.ConnKey{PID: 1, FD: 3}, Q: pgwire.Query{Start: 1, End: 10, SQL: "select 1 /*...*/", Operation: "SELECT"}},
 		Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 4}, Correlation: "exact", Q: pgwire.Query{Start: 2, End: 9, Operation: "SELECT"}}},
@@ -240,33 +327,34 @@ func TestExportTraceWithRemoteParent(t *testing.T) {
 		Comment:   sqlcomment.Comment{TraceParent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", TraceState: "congo=t61rcWkgMzE", Valid: true, Attrs: map[string]string{"route": "/orders"}},
 		UseParent: true,
 	}
-	e.ExportTrace(tr, sampler.ReasonParent, info, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
-	spans := mem.GetSpans()
-	if len(spans) != 2 {
-		t.Fatalf("%d spans", len(spans))
-	}
-	for _, s := range spans {
-		if s.SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" {
-			t.Fatalf("trace id %s", s.SpanContext.TraceID())
-		}
-		if s.SpanKind == trace.SpanKindServer {
-			if s.Parent.SpanID().String() != "00f067aa0ba902b7" || !s.Parent.IsRemote() {
-				t.Fatalf("root parent %v remote=%v", s.Parent.SpanID(), s.Parent.IsRemote())
-			}
-			a := attrs(s.Attributes)
-			if a["pgtrace.trace_context"].AsString() != "sqlcommenter" || a["sqlcommenter.route"].AsString() != "/orders" {
-				t.Fatalf("root attrs %v", a)
-			}
-		}
-	}
-	// Without UseParent the comment attributes are kept but the span is a root.
-	mem.Reset()
+	e.ExportTrace(tr, sampler.ReasonParent, info, noAddr)
 	info.UseParent = false
-	e.ExportTrace(tr, sampler.ReasonRatio, info, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
-	for _, s := range mem.GetSpans() {
-		if s.SpanKind == trace.SpanKindServer && (s.Parent.IsValid() || attrs(s.Attributes)["sqlcommenter.route"].AsString() != "/orders") {
-			t.Fatalf("not-per-execution comment: parent=%v attrs=%v", s.Parent, attrs(s.Attributes))
+	e.ExportTrace(tr, sampler.ReasonRatio, info, noAddr)
+	drain(t, e)
+	var withParent, without int
+	for _, s := range col.spans() {
+		a := spanAttrs(s.Span)
+		if s.Kind != tracepb.Span_SPAN_KIND_SERVER {
+			continue
 		}
+		if a["sqlcommenter.route"].GetStringValue() != "/orders" {
+			t.Fatalf("root attrs %v", a)
+		}
+		if hex.EncodeToString(s.TraceId) == "4bf92f3577b34da6a3ce929d0e0e4736" {
+			if hex.EncodeToString(s.ParentSpanId) != "00f067aa0ba902b7" || s.TraceState != "congo=t61rcWkgMzE" ||
+				a["pgtrace.trace_context"].GetStringValue() != "sqlcommenter" {
+				t.Fatalf("remote parent root %+v", s.Span)
+			}
+			withParent++
+		} else {
+			if len(s.ParentSpanId) != 0 {
+				t.Fatalf("root without UseParent has a parent")
+			}
+			without++
+		}
+	}
+	if withParent != 1 || without != 1 {
+		t.Fatalf("withParent=%d without=%d", withParent, without)
 	}
 }
 
@@ -279,47 +367,85 @@ func TestSampledFlag(t *testing.T) {
 	}
 }
 
-func TestExportConnErrorAndIdle(t *testing.T) {
-	e, mem := newTest(t)
+func TestExportConnError(t *testing.T) {
+	e, col, _ := newTest(t, nil)
 	e.ExportConnError(ConnError{Client: true, Key: event.ConnKey{PID: 1, FD: 9}, Start: uint64(monoNow - 3_000_000), End: uint64(monoNow),
 		Code: "28P01", Message: "password authentication failed", Addr: netip.MustParseAddrPort("10.0.0.9:5555"),
 		Params: map[string]string{"user": "bob", "database": "shop"}})
-	s := mem.GetSpans()[0]
-	a := attrs(s.Attributes)
-	if s.Name != "connect" || s.SpanKind != trace.SpanKindServer || s.Status.Code != codes.Error ||
-		a["db.response.status_code"].AsString() != "28P01" || a["db.user"].AsString() != "bob" ||
-		a["client.address"].AsString() != "10.0.0.9" || !a["pgtrace.connection_error"].AsBool() ||
-		s.EndTime.Sub(s.StartTime) != 3*time.Millisecond {
-		t.Fatalf("span %s %v %v attrs %v", s.Name, s.SpanKind, s.Status, a)
-	}
-	mem.Reset()
-	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: pgwire.Query{Start: 1, End: 2, Operation: "COMMIT"}}}
-	e.ExportTrace(tr, sampler.ReasonSlow, ClientInfo{IdleInTx: 5 * time.Second}, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
-	if v := attrs(mem.GetSpans()[0].Attributes)["pgbouncer.idle_in_tx_ms"].AsFloat64(); v != 5000 {
-		t.Fatalf("idle_in_tx_ms %v", v)
+	drain(t, e)
+	s := col.spans()[0]
+	a := spanAttrs(s.Span)
+	if s.Name != "connect" || s.Kind != tracepb.Span_SPAN_KIND_SERVER || s.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR ||
+		a["db.response.status_code"].GetStringValue() != "28P01" || a["db.user"].GetStringValue() != "bob" ||
+		a["client.address"].GetStringValue() != "10.0.0.9" || !a["pgtrace.connection_error"].GetBoolValue() ||
+		s.EndTimeUnixNano-s.StartTimeUnixNano != uint64(3*time.Millisecond) {
+		t.Fatalf("span %+v attrs %v", s.Span, a)
 	}
 }
 
-type failing struct{}
-
-func (failing) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error { return errors.New("down") }
-func (failing) Shutdown(context.Context) error                             { return nil }
-
-func TestExportCounters(t *testing.T) {
-	var created, exported, failed int
-	hooks := Hooks{Created: func() { created++ }, Exported: func(n int) { exported += n }, Failed: func() { failed++ }}
-	mem := tracetest.NewInMemoryExporter()
-	e := newWithSpanExporter(counting(mem, hooks), "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
-	e.SetOptions(Options{Hooks: hooks})
-	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1"}})
-	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 2"}})
-	if created != 2 || exported != 2 || failed != 0 {
-		t.Fatalf("created=%d exported=%d failed=%d", created, exported, failed)
+func TestBatchingAndConcurrency(t *testing.T) {
+	e, col, cnt := newTest(t, func(c *Config) { c.Workers = 4; c.BatchSpans = 100 })
+	col.delay = 20 * time.Millisecond
+	for i := 0; i < 5000; i++ {
+		e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1"}})
 	}
-	f := newWithSpanExporter(counting(failing{}, hooks), "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
-	f.SetOptions(Options{Hooks: hooks})
-	f.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 3"}})
-	if created != 3 || exported != 2 || failed != 1 {
-		t.Fatalf("after failure: created=%d exported=%d failed=%d", created, exported, failed)
+	drain(t, e)
+	if got := len(col.spans()); got != 5000 {
+		t.Fatalf("delivered %d spans", got)
+	}
+	if cnt.created.Load() != 5000 || cnt.exported.Load() != 5000 || cnt.failed.Load() != 0 || cnt.dropped.Load() != 0 {
+		t.Fatalf("counts created=%d exported=%d failed=%d dropped=%d", cnt.created.Load(), cnt.exported.Load(), cnt.failed.Load(), cnt.dropped.Load())
+	}
+	for _, r := range col.reqs {
+		if n := len(r.ResourceSpans[0].ScopeSpans[0].Spans); n > 100 {
+			t.Fatalf("batch of %d spans", n)
+		}
+	}
+	if col.maxIn.Load() < 2 {
+		t.Fatalf("requests were not concurrent (max in flight %d)", col.maxIn.Load())
 	}
 }
+
+func TestFailedBatchCounted(t *testing.T) {
+	e, col, cnt := newTest(t, nil)
+	col.fail.Store(true)
+	for i := 0; i < 3; i++ {
+		e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1"}})
+	}
+	drain(t, e)
+	if cnt.created.Load() != 3 || cnt.exported.Load() != 0 || cnt.failed.Load() != 3 {
+		t.Fatalf("created=%d exported=%d failed=%d", cnt.created.Load(), cnt.exported.Load(), cnt.failed.Load())
+	}
+}
+
+func TestQueueOverflowDropsAndCounts(t *testing.T) {
+	block := make(chan struct{})
+	e, _, cnt := newTest(t, func(c *Config) {
+		c.QueueTraces, c.Workers, c.BatchSpans = 10, 1, 1
+		// Stall the only worker inside a request so the queue fills up.
+		c.Client = &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			<-block
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})}
+	})
+	tr := correlate.Trace{Client: &correlate.ClientQuery{Q: pgwire.Query{Start: 1, End: 2}},
+		Server: []correlate.ServerQuery{{Q: pgwire.Query{Start: 1, End: 2}, Correlation: "exact"}}}
+	for i := 0; i < 50; i++ {
+		e.ExportTrace(tr, sampler.ReasonRatio, ClientInfo{}, noAddr)
+	}
+	if cnt.dropped.Load() == 0 {
+		t.Fatal("expected dropped spans when the queue is full")
+	}
+	if cnt.dropped.Load()%2 != 0 {
+		t.Fatalf("dropped %d spans: a trace is 2 spans", cnt.dropped.Load())
+	}
+	close(block)
+	drain(t, e)
+	if total := cnt.created.Load() + cnt.dropped.Load(); total != 100 {
+		t.Fatalf("created %d + dropped %d != 100", cnt.created.Load(), cnt.dropped.Load())
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -13,7 +13,7 @@ OUT=${OUT:-$root/docs/perf-results/sampling}
 export BUILDX_BUILDER=${BUILDX_BUILDER:-default} PGTRACE_STATS_INTERVAL=5s PGTRACE_PPROF=true
 mkdir -p "$OUT/profiles"
 csv="$OUT/results.csv"
-echo "rep,config,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_rss_mb,vt_cpu_pct,vt_rss_mb,client_q_per_s,spans_created_per_s,spans_exported_per_s,export_failed_batches,export_backlog,kernel_drops,vt_stored_spans,vt_lag_s" > "$csv"
+echo "rep,config,tps,lat_ms,pgbouncer_cpu_pct,agent_cpu_pct,agent_rss_mb,vt_cpu_pct,vt_rss_mb,client_q_per_s,spans_created_per_s,spans_exported_per_s,export_failed_batches,export_backlog,export_dropped_spans,kernel_drops,vt_stored_spans,vt_lag_s" > "$csv"
 
 cg() { echo "/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' "$1").scope"; }
 cpu_usec() { awk '/^usage_usec/ {print $2}' "$(cg "$1")/cpu.stat" 2>/dev/null || echo 0; }
