@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/t1bur1an/pgtrace/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 )
 
 func header(kind, dir uint8, fd int32, total, capLen uint32) []byte {

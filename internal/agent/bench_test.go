@@ -4,10 +4,10 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/t1bur1an/pgtrace/internal/connmap"
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/event"
-	"github.com/t1bur1an/pgtrace/internal/export"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/connmap"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/export"
 )
 
 // BenchmarkPipeline pushes one correlated query (client recv, server send,

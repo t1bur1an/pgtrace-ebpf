@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/t1bur1an/pgtrace/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 )
 
 // feedChunks feeds b in chunks of n bytes and returns the largest buffer

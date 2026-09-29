@@ -11,9 +11,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
-	"github.com/t1bur1an/pgtrace/internal/sampler"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sampler"
 )
 
 var buckets = prometheus.ExponentialBuckets(50e-6, 2.5, 12) // 50 µs … ~3 s

@@ -7,8 +7,8 @@ import (
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
-	"github.com/t1bur1an/pgtrace/internal/sampler"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sampler"
 )
 
 type discard struct{}

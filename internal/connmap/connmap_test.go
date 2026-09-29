@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/t1bur1an/pgtrace/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 )
 
 const tcp4 = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode

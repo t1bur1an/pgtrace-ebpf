@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
 )
 
 func fast() pgwire.Query { return pgwire.Query{Start: 0, End: uint64(time.Millisecond)} }

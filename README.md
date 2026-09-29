@@ -192,3 +192,10 @@ make generate    # re-generate BPF objects after editing bpf/pgtrace.bpf.c (clan
   (fentry/fexit, 5.5+). Tested on 7.2.
 - Only `send`/`recv`-family syscalls are captured (what pgbouncer uses);
   `read`/`write` on sockets is not.
+
+## License
+
+MIT, see `LICENSE`. The eBPF program `bpf/pgtrace.bpf.c` is dual-licensed
+`MIT OR GPL-2.0-only` and declares `"Dual MIT/GPL"` to the kernel. The kernel
+only lets GPL-compatible programs use `bpf_probe_read_user` and fentry/fexit,
+so this declaration is required; you may use the file under MIT.

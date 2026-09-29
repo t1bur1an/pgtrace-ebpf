@@ -9,8 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
 )
 
 // series counts exposed samples: one per counter/gauge, buckets+2 per histogram.

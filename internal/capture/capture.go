@@ -19,7 +19,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/t1bur1an/pgtrace/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 	"golang.org/x/sys/unix"
 )
 

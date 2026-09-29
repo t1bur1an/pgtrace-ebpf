@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (MIT OR GPL-2.0-only)
+// Dual-licensed: the kernel only allows GPL-compatible programs to use
+// bpf_probe_read_user and fentry/fexit, and accepts "Dual MIT/GPL" as such.
 // Captures socket payloads of traced processes (pgbouncer) with fexit probes on
 // the kernel's sendto/recvfrom/connect implementations. fentry/fexit only cost
 // the probed functions; syscall tracepoints would push every syscall on the
@@ -244,4 +246,4 @@ int BPF_PROG(enter_close, void *regs)
 	return 0;
 }
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual MIT/GPL";

@@ -10,12 +10,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/t1bur1an/pgtrace/internal/connmap"
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/event"
-	"github.com/t1bur1an/pgtrace/internal/export"
-	"github.com/t1bur1an/pgtrace/internal/metrics"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/connmap"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/export"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/metrics"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
 )
 
 func msg(typ byte, body string) []byte {

@@ -13,11 +13,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/event"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
-	"github.com/t1bur1an/pgtrace/internal/sampler"
-	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sampler"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sqlcomment"
 )
 
 const (

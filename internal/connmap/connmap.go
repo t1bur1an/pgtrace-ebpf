@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/t1bur1an/pgtrace/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 )
 
 type Side uint8

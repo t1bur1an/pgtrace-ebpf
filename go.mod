@@ -1,4 +1,4 @@
-module github.com/t1bur1an/pgtrace
+module github.com/t1bur1an/pgtrace-ebpf
 
 go 1.27.1
 

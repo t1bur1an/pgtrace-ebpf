@@ -18,11 +18,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 
-	"github.com/t1bur1an/pgtrace/internal/correlate"
-	"github.com/t1bur1an/pgtrace/internal/event"
-	"github.com/t1bur1an/pgtrace/internal/pgwire"
-	"github.com/t1bur1an/pgtrace/internal/sampler"
-	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sampler"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/sqlcomment"
 )
 
 // Span is a kept query plus the connection it was seen on.
@@ -86,7 +86,7 @@ func build(sp sdktrace.SpanProcessor, service string, clock func() (mono, wall i
 		sdktrace.WithSampler(sdktrace.AlwaysSample()), // sampling is done upstream
 	)
 	mono, wall := clock()
-	return &Exporter{tp: tp, tracer: tp.Tracer("github.com/t1bur1an/pgtrace"), offset: wall - mono,
+	return &Exporter{tp: tp, tracer: tp.Tracer("github.com/t1bur1an/pgtrace-ebpf"), offset: wall - mono,
 		opts: Options{MaxQueryText: DefaultMaxQueryText}}
 }
 
