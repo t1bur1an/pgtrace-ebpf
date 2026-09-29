@@ -34,6 +34,9 @@ import (
 	"github.com/t1bur1an/pgtrace/internal/sqlcomment"
 )
 
+// version is set at build time: -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 type config struct {
 	comm, procRoot     string
 	pgPort, listenPort uint
@@ -79,7 +82,12 @@ func main() {
 	flag.BoolVar(&c.sqlcommenter, "sqlcommenter", true, "read SQLCommenter comments; a traceparent makes the application span the parent of the pgbouncer span")
 	flag.BoolVar(&c.parentSampling, "sqlcommenter-parent-sampling", true, "always keep traces whose SQLCommenter parent is sampled")
 	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("pgtrace-agent", version)
+		return
+	}
 	applyEnv()
 
 	if err := run(c); err != nil {
@@ -191,7 +199,7 @@ func run(c config) error {
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
 	ag.SetAttachParamSync(c.attachParamSync)
-	slog.Info("attached", "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
+	slog.Info("attached", "version", version, "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
 		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync)

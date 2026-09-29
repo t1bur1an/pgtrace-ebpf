@@ -1,2 +1,4 @@
 .superpowers/
 /bin/
+__pycache__/
+*.pyc

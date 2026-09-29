@@ -147,6 +147,26 @@ Plus the standard Go and process collectors. Every label is bounded; the
 series ceiling is 2,518 without client labels and 8,952 with the default
 label limit. See `docs/metrics.md` for every series and how to size the limit.
 
+## Releases
+
+Pushing a tag like `v1.2.3` runs `.github/workflows/release.yml`, which:
+- runs the tests;
+- builds a static linux/amd64 `pgtrace-agent` with the version embedded
+  (`pgtrace-agent -version`);
+- publishes `pgtrace-agent_<tag>_linux_amd64.tar.gz` and `checksums.txt` as a
+  GitHub Release with generated notes (tags containing `-`, e.g.
+  `v1.0.0-rc1`, become pre-releases);
+- pushes the image `ghcr.io/t1bur1an/pgtrace-ebpf:<version>` (plus
+  `:<major>.<minor>` and `:latest` for non-pre-releases).
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+```
+
+`.github/workflows/ci.yml` runs vet, race-enabled tests, a check that the BPF
+program compiles, and a binary and image build on every push to `main` and on
+pull requests.
+
 ## Development
 
 ```bash

@@ -5,7 +5,8 @@ RUN go mod download
 COPY . .
 # BPF objects are pre-generated (internal/capture/pgtrace_x86_bpfel.o); run
 # `make generate` after editing bpf/pgtrace.bpf.c.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /pgtrace-agent ./cmd/pgtrace-agent
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /pgtrace-agent ./cmd/pgtrace-agent
 
 FROM debian:bookworm-slim
 COPY --from=build /pgtrace-agent /usr/local/bin/pgtrace-agent

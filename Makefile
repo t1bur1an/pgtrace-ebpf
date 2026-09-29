@@ -3,8 +3,10 @@
 generate:
 	go generate ./...
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 build:
-	go build -o bin/pgtrace-agent ./cmd/pgtrace-agent
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/pgtrace-agent ./cmd/pgtrace-agent
 
 test:
 	go test -race ./...
