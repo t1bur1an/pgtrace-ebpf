@@ -33,7 +33,7 @@ if on:
     created, exported = dlab("pgtrace_export_spans_total", 'stage="created"'), dlab("pgtrace_export_spans_total", 'stage="exported"')
     cells += [f"{dlab('pgtrace_queries_total', 'side=\"client\"') / d:.0f}", f"{created / d:.0f}", f"{exported / d:.0f}",
               f"{dlab('pgtrace_export_spans_total', 'stage=\"failed_batches\"'):.0f}", f"{created - exported:.0f}",
-              f"{val(m1, 'pgtrace_kernel_drops_total'):.0f}", f"{int(s1) - int(s0)}", lag]
+              f"{dlab('pgtrace_export_spans_total', 'stage=\"dropped\"'):.0f}", f"{val(m1, 'pgtrace_kernel_drops_total'):.0f}", f"{int(s1) - int(s0)}", lag]
 else:
-    cells += [""] * 8
+    cells += [""] * 9
 print(",".join(cells))

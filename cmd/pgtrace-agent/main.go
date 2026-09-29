@@ -59,6 +59,10 @@ type config struct {
 	attachParamSync    bool
 	pprof              bool
 	debugDumpDir       string
+	exportWorkers      int
+	exportBatch        int
+	exportQueue        int
+	exportInterval     time.Duration
 }
 
 func main() {
@@ -72,6 +76,10 @@ func main() {
 	flag.IntVar(&c.slowMS, "slow-ms", 100, "always keep traces at least this slow")
 	flag.StringVar(&c.endpoint, "otlp-endpoint", "http://victoriatraces:10428/insert/opentelemetry/v1/traces", "OTLP/HTTP traces URL")
 	flag.StringVar(&c.service, "service-name", "pgbouncer", "service.name resource attribute")
+	flag.IntVar(&c.exportWorkers, "export-workers", 4, "concurrent export workers (each builds and sends its own batches)")
+	flag.IntVar(&c.exportBatch, "export-batch", 8192, "most spans per OTLP request")
+	flag.IntVar(&c.exportQueue, "export-queue", 65536, "traces waiting for a worker; when full, new traces are dropped and counted")
+	flag.DurationVar(&c.exportInterval, "export-interval", time.Second, "send a partial batch after this long")
 	flag.DurationVar(&c.statsEvery, "stats-interval", 10*time.Second, "stats log interval")
 	flag.BoolVar(&c.bpfStats, "bpf-stats", false, "enable kernel BPF run-time accounting")
 	flag.StringVar(&c.metricsAddr, "metrics-addr", ":9464", "Prometheus /metrics listen address (empty disables)")
@@ -152,12 +160,17 @@ func run(c config) error {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
-	created, exported, failed := met.ExportHooks()
-	hooks := export.Hooks{Created: created, Exported: exported, Failed: failed}
-	exp, err := export.New(ctx, c.endpoint, c.service, hooks)
+	created, exported, failed, dropped := met.ExportHooks()
+	exp, err := export.New(export.Config{
+		Endpoint: c.endpoint, Service: c.service,
+		Workers: c.exportWorkers, BatchSpans: c.exportBatch, QueueTraces: c.exportQueue, Interval: c.exportInterval,
+		MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") },
+		Hooks: export.Hooks{Created: created, Exported: exported, Failed: failed, Dropped: dropped},
+	})
 	if err != nil {
 		return err
 	}
+	met.RegisterExportQueue(exp.QueueLen)
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -173,8 +186,8 @@ func run(c config) error {
 	}
 	defer capt.Close()
 
-	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }, Hooks: hooks})
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
+	met.RegisterRecursionMisses(capt.RecursionMisses)
 	if c.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

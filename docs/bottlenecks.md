@@ -1,5 +1,10 @@
 # Bottlenecks at 100 % sampling
 
+> **Status (2026-09-29):** fixes 1–3 and the capture-gap detection are done:
+> own exporter, direct OTLP encoding, GC settings and TCP-offset gap
+> detection. See [After the fixes](#after-the-fixes) at the end. The
+> measurements below are the "before" state.
+
 Measured on 2026-09-29 with `scripts/perf_sampling.sh`: 1,000 pgbench clients,
 select-only, through one pgbouncer (pool 20), 30 s per run, 3 repetitions.
 Everything runs on one 8-core / 16-thread box. The agent has client tracing,
@@ -108,3 +113,48 @@ parser misaligned. The length checks now detect this within a message.
 **Proposed fix:** record the TCP stream position per event, so gaps are
 known exactly and skipped cleanly, plus a `pgtrace_bpf_recursion_misses_total`
 metric.
+
+## After the fixes
+
+Same benchmark and machine (`scripts/perf_sampling.sh`, 1,000 clients, 3 × 30 s).
+Raw data: `docs/perf-results/sampling-own-exporter-v2/`. The first run of the
+new exporter (`sampling-own-exporter/`) still had `GOGC=200` and a 504-byte
+queue slot, and used almost twice the memory.
+
+The agent now has its own exporter. The event loop hands kept traces to a
+bounded queue of pooled job pointers. 4 workers encode OTLP protobuf directly,
+and each POSTs its own 8,192-span batches. The image sets only
+`GOMEMLIMIT=768MiB`.
+
+| | before, 10 % | after, 10 % | before, 100 % | after, 100 % |
+|---|---:|---:|---:|---:|
+| TPS (agent off ≈ 84 500) | 67 790 | 67 403 | 61 004 | 61 254 |
+| agent CPU | 0.74 core | **0.51 core** | 2.03 cores | **0.68 core** |
+| agent RSS (peak) | 82 MB | 99 MB | 328 MB | **145 MB** |
+| spans created per second | 13 264 | 13 188 | 119 549 | 120 038 |
+| spans delivered per second | 13 264 | 13 188 | 91 620 | **120 038 (all)** |
+| spans lost per 30 s run | 0 | 0 | ≈ 838 k | **0** (queue drops 0, failed batches 0) |
+| GC share of agent CPU | | | 35 % | **1.6 %** |
+| event loop (`Agent.Run`) | | | 0.82 core | 0.43 core |
+| VictoriaTraces CPU | 15 % | 16 % | 81 % | 118 % |
+
+- **1. Export ceiling:** gone. Every span was delivered at 120 k spans/s, and
+  the queue never filled. If it does fill, the loss shows up in
+  `pgtrace_export_spans_total{stage="dropped"}`.
+- **2. GC:** direct encoding into reused buffers removed nearly all per-span
+  allocation. Encoding a two-span trace takes about 1.1 µs and 2 small
+  allocations (`BenchmarkEncodeTrace`).
+- **3. Event loop:** span building runs on the workers. The event loop is now
+  parsing and correlation only, at 0.43 core for 60 k client queries/s. That
+  leaves about 2× headroom on this machine before it saturates one core, which
+  is the next limit.
+- **4. TPS cost:** unchanged, −20 % at 10 % and −28 % at 100 %. The agent now
+  uses about 1.35 cores less, but VictoriaTraces ingests 30 % more spans and
+  uses about 0.35 core more. The remaining cost is the kernel capture and the
+  competition for the shared 16 threads, not the export.
+- **Capture gaps:** a 90-minute soak at 10 %
+  (`docs/soak-results/export-20260929-1704/`) had 118 + 24 skipped
+  recvfrom/sendto runs. 2 of them hit pgbouncer's connections and were detected
+  as gaps (83 KB and 148 KB). Each was too large to skip within one message, so
+  the parser resynchronised. The result was 1 orphan in 1.26 M queries, where
+  the diagnostic soak before the fix had 36,441.

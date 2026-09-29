@@ -108,6 +108,10 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-slow-ms` | `100` | traces at least this slow are always kept |
 | `-otlp-endpoint` | `http://victoriatraces:10428/insert/opentelemetry/v1/traces` | OTLP/HTTP traces URL |
 | `-service-name` | `pgbouncer` | `service.name` resource attribute |
+| `-export-workers` | `4` | concurrent export workers; each encodes and sends its own batches |
+| `-export-batch` | `8192` | most spans per OTLP request |
+| `-export-queue` | `65536` | traces waiting for a worker; when full, new traces are dropped and counted |
+| `-export-interval` | `1s` | a partial batch is sent after this long |
 | `-metrics-addr` | `:9464` | Prometheus `/metrics` address; empty disables it |
 | `-stats-interval` | `10s` | stats log interval |
 | `-bpf-stats` | `false` | enable kernel BPF run-time accounting (~1% extra overhead) |
@@ -120,6 +124,9 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-sqlcommenter` | `true` | read SQLCommenter comments; a `traceparent` parents the pgbouncer span |
 | `-sqlcommenter-parent-sampling` | `true` | always keep traces whose SQLCommenter parent is sampled |
 | `-attach-param-sync` | `true` | attach pgbouncer's parameter-sync `SET`/`RESET` statements (e.g. `SET application_name`) to the client query they precede, as internal children |
+
+The image sets `GOMEMLIMIT=768MiB`, a soft memory cap for the Go runtime;
+override it with `-e` to match the agent's memory budget.
 
 The agent needs `privileged` (or CAP_BPF + CAP_PERFMON + CAP_SYS_PTRACE) and the
 host pid namespace.
@@ -136,6 +143,10 @@ host pid namespace.
 | `pgtrace_spans_total` | `decision` | kept_error / kept_slow / kept_ratio / dropped |
 | `pgtrace_events_total` | `kind` | kernel events |
 | `pgtrace_kernel_drops_total` | | ringbuf overflows (should be 0) |
+| `pgtrace_capture_gaps_total` | `side` | capture events the kernel skipped, detected by TCP stream offset; the parser skips the gap |
+| `pgtrace_bpf_recursion_misses_total` | `program` | BPF runs the kernel skipped (recursion protection) |
+| `pgtrace_export_spans_total` | `stage` | created / exported / dropped (export queue full) / failed_batches |
+| `pgtrace_export_queue_length` | | traces waiting for an export worker |
 | `pgtrace_connections` | `side` | tracked sockets |
 | `pgtrace_traced_processes` | | pgbouncer processes |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | | with `-bpf-stats` |
@@ -144,7 +155,7 @@ host pid namespace.
 | `pgtrace_client_*` | enabled client labels | opt-in (`-metrics-labels`): queries, errors, duration, pool wait per database/user/client IP |
 
 Plus the standard Go and process collectors. Every label is bounded; the
-series ceiling is 2,528 without client labels and 8,962 with the default
+series ceiling is 2,539 without client labels and 8,973 with the default
 label limit. See `docs/metrics.md` for every series and how to size the limit.
 
 ## Releases

@@ -9,6 +9,7 @@
 #include <linux/types.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 // Compile-time ceiling on bytes copied per syscall; the runtime value is
 // capture_bytes (set by the agent before load). The per-CPU scratch event must
@@ -42,8 +43,47 @@ struct event {
 	__u8 port[2]; // network order
 	__u8 pad[2];
 	__u8 addr[16];
+	__u32 seq;   // TCP stream offset of the first payload byte (flags & 1)
+	__u32 flags;
 	__u8 payload[MAX_PAYLOAD];
 };
+
+#define F_SEQ 1
+#define IPPROTO_TCP 6
+
+// Minimal kernel type definitions for CO-RE: only the fields read here; the
+// loader relocates them against the running kernel's BTF.
+struct fdtable {
+	unsigned int max_fds;
+	struct file **fd;
+} __attribute__((preserve_access_index));
+struct files_struct {
+	struct fdtable *fdt;
+} __attribute__((preserve_access_index));
+struct task_struct {
+	struct files_struct *files;
+} __attribute__((preserve_access_index));
+struct file {
+	void *private_data;
+} __attribute__((preserve_access_index));
+struct socket {
+	struct sock *sk;
+} __attribute__((preserve_access_index));
+struct sock_common {
+	unsigned short skc_family;
+} __attribute__((preserve_access_index));
+struct sock {
+	struct sock_common __sk_common;
+	__u16 sk_protocol;
+	__u8 sk_shutdown; // a bitfield on some kernels: read with BPF_CORE_READ_BITFIELD_PROBED
+} __attribute__((preserve_access_index));
+struct tcp_sock {
+	__u32 write_seq;
+	__u32 copied_seq;
+	__u32 rcv_nxt;
+} __attribute__((preserve_access_index));
+
+#define RCV_SHUTDOWN 1
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -128,6 +168,43 @@ static __always_inline struct event *new_event(__u64 pid_tgid, __s32 fd, __u8 ki
 	return e;
 }
 
+// tcp_seq reads the stream offset of the first byte just sent (write_seq -
+// ret) or received (copied_seq - ret) on fd. Returns 0 for non-TCP sockets.
+static __always_inline int tcp_seq(__s32 fd, int ret, __u8 dir, __u32 *out)
+{
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	struct fdtable *fdt = BPF_CORE_READ(task, files, fdt);
+	if (!fdt || fd < 0 || (unsigned int)fd >= BPF_CORE_READ(fdt, max_fds))
+		return 0;
+	struct file **fds = BPF_CORE_READ(fdt, fd);
+	struct file *f = NULL;
+	if (bpf_probe_read_kernel(&f, sizeof(f), &fds[fd]) != 0 || !f)
+		return 0;
+	struct socket *so = BPF_CORE_READ(f, private_data);
+	if (!so)
+		return 0;
+	struct sock *sk = BPF_CORE_READ(so, sk);
+	if (!sk)
+		return 0;
+	unsigned short family = BPF_CORE_READ(sk, __sk_common.skc_family);
+	if ((family != AF_INET && family != AF_INET6) || BPF_CORE_READ(sk, sk_protocol) != IPPROTO_TCP)
+		return 0;
+	struct tcp_sock *tp = (struct tcp_sock *)sk;
+	__u32 end;
+	if (dir == D_SEND) {
+		end = BPF_CORE_READ(tp, write_seq);
+	} else {
+		end = BPF_CORE_READ(tp, copied_seq);
+		// A read that also consumed the peer's FIN advanced copied_seq by
+		// one more than the data returned.
+		__u8 shut = BPF_CORE_READ_BITFIELD_PROBED(sk, sk_shutdown);
+		if ((shut & RCV_SHUTDOWN) && end == BPF_CORE_READ(tp, rcv_nxt))
+			end -= 1;
+	}
+	*out = end - (__u32)ret;
+	return 1;
+}
+
 static __always_inline void emit_data(__s32 fd, void *buf, int ret, __u8 dir)
 {
 	if (ret <= 0)
@@ -145,6 +222,9 @@ static __always_inline void emit_data(__s32 fd, void *buf, int ret, __u8 dir)
 		n = MAX_PAYLOAD;
 	e->dir = dir;
 	e->total_len = ret;
+	e->flags = 0;
+	if (tcp_seq(fd, ret, dir, &e->seq))
+		e->flags = F_SEQ;
 	if (bpf_probe_read_user(e->payload, n, buf) != 0)
 		n = 0;
 	e->cap_len = n;

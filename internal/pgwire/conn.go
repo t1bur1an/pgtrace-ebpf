@@ -164,6 +164,32 @@ func (c *Conn) Feed(dir event.Dir, ts uint64, payload []byte, totalLen uint32) R
 	return r
 }
 
+// Skip tells the parser that n bytes in direction dir were never seen (the
+// capture skipped them) before the event at ts. See stream.skip.
+func (c *Conn) Skip(dir event.Dir, ts uint64, n int) Result {
+	var r Result
+	if dir == c.feDir {
+		msgs, desync := c.fe.skip(n)
+		if desync {
+			c.forget()
+			r.Resynced = true
+		}
+		for _, m := range msgs {
+			c.frontend(ts, m, &r)
+		}
+		return r
+	}
+	msgs, desync := c.be.skip(n)
+	for _, m := range msgs {
+		c.backend(ts, m, &r)
+	}
+	if desync {
+		c.forget()
+		r.Resynced = true
+	}
+	return r
+}
+
 // forget drops in-flight queries after a stream lost its place.
 func (c *Conn) forget() {
 	c.groups, c.open = nil, nil

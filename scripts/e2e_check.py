@@ -137,7 +137,7 @@ check("per-database pool-wait series for the tiny pool", val(r'^pgtrace_client_p
 check("per-client metrics carry database/user/client_addr labels",
       re.search(r'^pgtrace_client_queries_total\{client_addr="[0-9.]+",database="postgres",user="postgres"\}', metrics, re.M) is not None)
 nseries = len([l for l in metrics.splitlines() if l.startswith("pgtrace_")])
-check("pgtrace series under the documented ceiling (limit 200: 8,962)", nseries <= 8962, f"{nseries} series")
+check("pgtrace series under the documented ceiling (limit 200: 8,973)", nseries <= 8973, f"{nseries} series")
 
 # --- SQLCommenter trace context -----------------------------------------------
 TID, PSID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"

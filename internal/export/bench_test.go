@@ -1,33 +1,33 @@
 package export
 
 import (
-	"context"
 	"net/netip"
 	"testing"
 
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-
+	"github.com/t1bur1an/pgtrace-ebpf/internal/correlate"
+	"github.com/t1bur1an/pgtrace-ebpf/internal/event"
 	"github.com/t1bur1an/pgtrace-ebpf/internal/pgwire"
 	"github.com/t1bur1an/pgtrace-ebpf/internal/sampler"
 )
 
-type discard struct{}
-
-func (discard) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error { return nil }
-func (discard) Shutdown(context.Context) error                             { return nil }
-
-// BenchmarkExport measures span creation plus the batch processor hand-off
-// (network export excluded).
-func BenchmarkExport(b *testing.B) {
-	bsp := sdktrace.NewBatchSpanProcessor(discard{}, sdktrace.WithMaxQueueSize(65536), sdktrace.WithMaxExportBatchSize(2048))
-	e := build(bsp, "pgbouncer", clocks)
-	defer e.Shutdown(context.Background())
-	s := Span{
-		Q:   pgwire.Query{Start: 1, End: 2, SQL: "SELECT abalance FROM pgbench_accounts WHERE aid = 12345;", Operation: "SELECT", CommandTag: "SELECT 1", Rows: 1, Protocol: "simple"},
-		PID: 42, FD: 7, Remote: netip.MustParseAddrPort("10.0.0.2:5432"), Reason: sampler.ReasonRatio,
-	}
+// BenchmarkEncodeTrace measures encoding one client+server trace (2 spans)
+// into a worker's batch buffer (no network).
+func BenchmarkEncodeTrace(b *testing.B) {
+	e := &Exporter{cfg: Config{MaxQueryText: DefaultMaxQueryText}, env: newEnvelope("pgbouncer")}
+	w := &worker{e: e, rng: nil}
+	w.rng = newRNG()
+	q := pgwire.Query{Start: 1, End: 2, SQL: "SELECT abalance FROM pgbench_accounts WHERE aid = 12345;", Operation: "SELECT", CommandTag: "SELECT 1", Rows: 1, Protocol: "simple"}
+	j := job{kind: jobTrace, reason: sampler.ReasonRatio,
+		trace: correlate.Trace{Client: &correlate.ClientQuery{Key: event.ConnKey{PID: 1, FD: 11}, Q: q},
+			Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 7}, Q: q, Correlation: "exact"}}},
+		client:  ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "u", "database": "d"}},
+		servers: []netip.AddrPort{netip.MustParseAddrPort("10.0.0.2:5432")}}
 	b.ReportAllocs()
 	for b.Loop() {
-		e.Export(s)
+		w.encode(&j)
+		if w.n >= 8192 {
+			w.req = e.env.request(w.req, w.spans)
+			w.spans, w.n = w.spans[:0], 0
+		}
 	}
 }

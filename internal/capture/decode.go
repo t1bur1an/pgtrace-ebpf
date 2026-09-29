@@ -9,7 +9,9 @@ import (
 )
 
 // headerSize is offsetof(struct event, payload) in bpf/pgtrace.bpf.c.
-const headerSize = 48
+const headerSize = 56
+
+const flagSeq = 1
 
 const (
 	kindData    = 0
@@ -42,6 +44,8 @@ func decode(raw []byte) (any, error) {
 			Dir:      event.Dir(raw[25]),
 			TotalLen: le.Uint32(raw[16:]),
 			Payload:  append([]byte(nil), raw[headerSize:headerSize+capLen]...),
+			Seq:      le.Uint32(raw[48:]),
+			HasSeq:   le.Uint32(raw[52:])&flagSeq != 0,
 		}, nil
 	case kindConnect:
 		addr, err := sockAddr(raw)

@@ -30,11 +30,14 @@ addresses (`internal/metrics/cardinality_test.go`).
 | `pgtrace_connections` | gauge | `side` = client, server | 2 |
 | `pgtrace_correlator_entries` | gauge | `kind` = queued, held, inflight, unattributed, paramsync | 5 |
 | `pgtrace_parser_resyncs_total` | counter | `side` = client, server: a parser lost its place and resynchronised | 2 |
-| `pgtrace_export_spans_total` | counter | `stage` = created, exported, failed_batches (created − exported = queued or dropped by the batch processor) | 3 |
+| `pgtrace_export_spans_total` | counter | `stage` = created (encoded), exported (delivered), dropped (export queue full; spans the trace would have had), failed_batches (counts batches, not spans). created − exported = spans in unsent or failed batches | 4 |
+| `pgtrace_export_queue_length` | gauge | – : traces waiting for an export worker | 1 |
+| `pgtrace_capture_gaps_total`, `pgtrace_capture_gap_bytes_total` | counter | `side` = client, server: jumps in a connection's TCP stream offset, i.e. capture events the kernel skipped | 4 |
 | `pgtrace_traced_processes` | gauge | – | 1 |
 | `pgtrace_kernel_drops_total` | counter | – | 1 |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | counter | – (only with `-bpf-stats`) | 2 |
-| **base ceiling** | | | **2 528** |
+| `pgtrace_bpf_recursion_misses_total` | counter | `program`: runs the kernel skipped because another run was active on the CPU | 5 |
+| **base ceiling** | | | **2 539** |
 
 The `operation` keywords are SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT,
 END, ROLLBACK, SET, SHOW, WITH, COPY, CREATE, ALTER, DROP, TRUNCATE, VACUUM,
@@ -85,10 +88,10 @@ combination that comes back starts its counters from zero, which Prometheus
 
 | `-metrics-label-limit` | max pgtrace series |
 |---:|---:|
-| labels off | 2 528 |
-| 50 | 4 162 |
-| 200 (default) | 8 962 |
-| 1 000 | 34 562 |
+| labels off | 2 539 |
+| 50 | 4 173 |
+| 200 (default) | 8 973 |
+| 1 000 | 34 573 |
 
 Choose the limit from your Prometheus budget. If
 `pgtrace_metrics_label_overflow_total` keeps rising, there are more active

@@ -107,3 +107,30 @@ func TestValidateCaptureBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeDataWithSeq(t *testing.T) {
+	raw := append(header(0, 0, 7, 3, 3), 'a', 'b', 'c')
+	binary.LittleEndian.PutUint32(raw[48:], 0xfffffff0)
+	binary.LittleEndian.PutUint32(raw[52:], 1)
+	got, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := got.(event.Data)
+	if !d.HasSeq || d.Seq != 0xfffffff0 || string(d.Payload) != "abc" {
+		t.Fatalf("got %+v", d)
+	}
+	raw2 := append(header(0, 0, 7, 3, 3), 'a', 'b', 'c') // flags 0: no sequence (unix socket)
+	if d := mustDecode(t, raw2).(event.Data); d.HasSeq {
+		t.Fatalf("seq without flag: %+v", d)
+	}
+}
+
+func mustDecode(t *testing.T, raw []byte) any {
+	t.Helper()
+	v, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}

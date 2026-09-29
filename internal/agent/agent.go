@@ -54,6 +54,9 @@ type conn struct {
 	idle      map[uint64]time.Duration // client query id → idle-in-transaction gap before it
 	recent    []recorded               // flight recorder ring (DumpDir only)
 	recentPos int
+
+	nextSeq [2]uint32 // expected TCP stream offset per direction
+	haveSeq [2]bool
 }
 
 type recorded struct {
@@ -61,6 +64,8 @@ type recorded struct {
 	dir      event.Dir
 	total    uint32
 	captured int // bytes the kernel copied (may be < total)
+	seq      uint32
+	hasSeq   bool
 	head     []byte
 }
 
@@ -232,7 +237,7 @@ func (a *Agent) data(ev event.Data) {
 		a.count(c.side, 1)
 	}
 	if a.DumpDir != "" {
-		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, captured: len(ev.Payload), head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
+		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, captured: len(ev.Payload), seq: ev.Seq, hasSeq: ev.HasSeq, head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
 		if len(c.recent) < recorderEvents {
 			c.recent = append(c.recent, r)
 		} else {
@@ -245,7 +250,24 @@ func (a *Agent) data(ev event.Data) {
 	if c.side == connmap.SideClient && ev.Dir == event.DirRecv {
 		a.cor.ClientRecv(pid, ev.Key, ev.TS)
 	}
-	r := c.p.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen)
+	side := map[connmap.Side]string{connmap.SideServer: "server", connmap.SideClient: "client"}[c.side]
+	// A jump in the TCP stream offset means the kernel skipped capture
+	// events (e.g. fentry/fexit recursion protection): skip those bytes.
+	if ev.HasSeq && ev.Dir <= event.DirRecv {
+		d := ev.Dir
+		if gap := ev.Seq - c.nextSeq[d]; c.haveSeq[d] && gap != 0 && gap < 1<<31 {
+			if a.Metrics != nil {
+				a.Metrics.CaptureGap(side, int(gap))
+			}
+			a.process(ev, c, pid, side, c.p.Skip(d, ev.TS, int(gap)))
+		}
+		c.nextSeq[d], c.haveSeq[d] = ev.Seq+ev.TotalLen, true
+	}
+	a.process(ev, c, pid, side, c.p.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen))
+}
+
+// process hands one parser result to the correlator and metrics.
+func (a *Agent) process(ev event.Data, c *conn, pid uint32, side string, r pgwire.Result) {
 	if a.Metrics != nil {
 		if uint32(len(ev.Payload)) < ev.TotalLen {
 			a.Metrics.Truncation("kernel")
@@ -254,7 +276,7 @@ func (a *Agent) data(ev event.Data) {
 			a.Metrics.Truncation("parser")
 		}
 		if r.Resynced {
-			a.Metrics.ParserResync(map[connmap.Side]string{connmap.SideServer: "server", connmap.SideClient: "client"}[c.side])
+			a.Metrics.ParserResync(side)
 		}
 	}
 	if r.Resynced && a.DumpDir != "" {
@@ -289,10 +311,6 @@ func (a *Agent) data(ev event.Data) {
 		a.cor.ClientDone(ev.Key, q)
 	}
 	for _, ce := range r.ConnErrors {
-		side := "server"
-		if c.side == connmap.SideClient {
-			side = "client"
-		}
 		if a.Metrics != nil {
 			a.Metrics.ConnectionError(side, ce.Code)
 		}
@@ -374,7 +392,7 @@ func (a *Agent) dump(head, kind string, keys ...event.ConnKey) {
 			if r.dir == event.DirRecv {
 				dir = "recv"
 			}
-			fmt.Fprintf(&b, "%d %s total=%d captured=%d shown=%d\n%s\n", r.ts, dir, r.total, r.captured, len(r.head), hex.Dump(r.head))
+			fmt.Fprintf(&b, "%d %s total=%d captured=%d seq=%d hasSeq=%v shown=%d\n%s\n", r.ts, dir, r.total, r.captured, r.seq, r.hasSeq, len(r.head), hex.Dump(r.head))
 		}
 	}
 	name := filepath.Join(a.DumpDir, fmt.Sprintf("%s-pid%d-fd%d-%d.txt", kind, keys[0].PID, keys[0].FD, time.Now().UnixNano()))

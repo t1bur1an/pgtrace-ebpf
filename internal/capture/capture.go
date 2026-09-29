@@ -235,6 +235,23 @@ func (c *Capture) Clear(k event.ConnKey) {
 	_ = c.objs.FdClass.Delete(fdKey{k.PID, k.FD})
 }
 
+// RecursionMisses returns, per program, how many runs the kernel skipped
+// because another run of the same program was active on the CPU (fentry/fexit
+// recursion protection). Skipped data runs show up as capture gaps.
+func (c *Capture) RecursionMisses() map[string]uint64 {
+	out := make(map[string]uint64, len(c.progs))
+	for _, p := range c.progs {
+		info, err := p.Info()
+		if err != nil {
+			continue
+		}
+		if st, err := p.Stats(); err == nil {
+			out[info.Name] = st.RecursionMisses
+		}
+	}
+	return out
+}
+
 // Drops returns the number of events the kernel failed to enqueue.
 func (c *Capture) Drops() uint64 {
 	var perCPU []uint64

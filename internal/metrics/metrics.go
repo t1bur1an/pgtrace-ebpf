@@ -72,6 +72,8 @@ type Metrics struct {
 	corEntries   *prometheus.GaugeVec
 	resyncs      *prometheus.CounterVec
 	exportSpans  *prometheus.CounterVec
+	gaps         *prometheus.CounterVec
+	gapBytes     *prometheus.CounterVec
 	processes    prometheus.Gauge
 	reg          prometheus.Registerer
 
@@ -133,9 +135,17 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_idle_in_transaction_seconds",
 			Help: "Gaps where a client sat idle inside a transaction, holding its server connection.", Buckets: buckets,
 		}),
+		gaps: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_capture_gaps_total",
+			Help: "Jumps in a connection's TCP stream offset: capture events the kernel skipped, by side.",
+		}, []string{"side"}),
+		gapBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_capture_gap_bytes_total",
+			Help: "Bytes in capture gaps, by side.",
+		}, []string{"side"}),
 		exportSpans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pgtrace_export_spans_total",
-			Help: "Spans through the exporter by stage: created, exported (delivered), failed_batches. created - exported = queued or dropped.",
+			Help: "Spans through the exporter by stage: created (encoded), exported (delivered), dropped (queue full), and failed_batches (batches, not spans). created - exported = spans in unsent or failed batches.",
 		}, []string{"stage"}),
 		resyncs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pgtrace_parser_resyncs_total",
@@ -152,7 +162,7 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_traced_processes", Help: "pgbouncer processes being traced.",
 		}),
 	}
-	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.corEntries, m.resyncs, m.exportSpans, m.conns, m.processes)
+	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.corEntries, m.resyncs, m.exportSpans, m.gaps, m.gapBytes, m.conns, m.processes)
 	if len(cfg.Labels) > 0 {
 		m.registerLabelled()
 	}
@@ -207,8 +217,8 @@ func MaxSeries(cfg Config) int {
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
 		2*(maxSQLStates+1) + // connection_errors_total: side × sqlstate
 		h + h + // pool_wait_seconds, idle_in_transaction_seconds
-		5 + 5 + 4 + 3 + 3 + 5 + 2 + 3 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, connections, traced_processes
-		1 + 2 // kernel drops, bpf run time/runs
+		5 + 5 + 4 + 3 + 3 + 5 + 2 + 4 + 1 + 4 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, export_queue_length, capture_gaps(+bytes), connections, traced_processes
+		1 + 2 + 5 // kernel drops, bpf run time/runs, recursion misses per program
 	if len(cfg.Labels) > 0 {
 		n += (cfg.Limit+1)*SeriesPerLabelSet + 2 // +1 for 'other'; label_sets, overflow
 	}
@@ -351,10 +361,28 @@ func (m *Metrics) ConnectionError(side, code string) {
 func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
 func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
 
-// ExportHooks feed pgtrace_export_spans_total.
-func (m *Metrics) ExportHooks() (created func(), exported func(int), failed func()) {
-	c, e, f := m.exportSpans.WithLabelValues("created"), m.exportSpans.WithLabelValues("exported"), m.exportSpans.WithLabelValues("failed_batches")
-	return c.Inc, func(n int) { e.Add(float64(n)) }, f.Inc
+// ExportHooks feed pgtrace_export_spans_total. Each takes a span count;
+// failed counts one failed batch whatever its size.
+func (m *Metrics) ExportHooks() (created, exported, failed, dropped func(n int)) {
+	add := func(stage string) func(int) {
+		c := m.exportSpans.WithLabelValues(stage)
+		return func(n int) { c.Add(float64(n)) }
+	}
+	f := m.exportSpans.WithLabelValues("failed_batches")
+	return add("created"), add("exported"), func(int) { f.Inc() }, add("dropped")
+}
+
+// RegisterExportQueue exposes the exporter's queue length, read on scrape.
+func (m *Metrics) RegisterExportQueue(n func() int) {
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "pgtrace_export_queue_length", Help: "Traces waiting for an export worker.",
+	}, func() float64 { return float64(n()) }))
+}
+
+// CaptureGap counts a skipped stretch of n bytes on side client/server.
+func (m *Metrics) CaptureGap(side string, n int) {
+	m.gaps.WithLabelValues(side).Inc()
+	m.gapBytes.WithLabelValues(side).Add(float64(n))
 }
 
 // ParserResync counts a parser that lost its place on side client/server.
@@ -365,6 +393,29 @@ func (m *Metrics) SetCorrelatorEntries(e map[string]int) {
 	for _, k := range []string{"queued", "held", "inflight", "unattributed", "paramsync"} {
 		m.corEntries.WithLabelValues(k).Set(float64(e[k]))
 	}
+}
+
+// missesCollector exposes per-program recursion misses read on scrape.
+type missesCollector struct {
+	desc *prometheus.Desc
+	read func() map[string]uint64
+}
+
+func (c missesCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+func (c missesCollector) Collect(ch chan<- prometheus.Metric) {
+	for prog, n := range c.read() {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.CounterValue, float64(n), prog)
+	}
+}
+
+// RegisterRecursionMisses exposes pgtrace_bpf_recursion_misses_total{program}.
+func (m *Metrics) RegisterRecursionMisses(read func() map[string]uint64) {
+	m.reg.MustRegister(missesCollector{
+		desc: prometheus.NewDesc("pgtrace_bpf_recursion_misses_total",
+			"BPF program runs skipped by the kernel because another run of the same program was active on the CPU.",
+			[]string{"program"}, nil),
+		read: read,
+	})
 }
 
 // RegisterKernel exposes kernel-side counters read on scrape.
