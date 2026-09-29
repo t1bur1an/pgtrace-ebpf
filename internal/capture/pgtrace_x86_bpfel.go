@@ -26,6 +26,8 @@ type pgtraceEvent struct {
 	Port     [2]uint8
 	Pad      [2]uint8
 	Addr     [16]uint8
+	Seq      uint32
+	Flags    uint32
 	Payload  [16384]uint8
 }
 

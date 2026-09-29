@@ -175,6 +175,7 @@ func run(c config) error {
 
 	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }, Hooks: hooks})
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
+	met.RegisterRecursionMisses(capt.RecursionMisses)
 	if c.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

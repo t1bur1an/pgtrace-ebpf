@@ -232,30 +232,43 @@ func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
 	}
 
 	if missing > 0 {
-		// The kernel didn't copy the last `missing` bytes of this chunk. They
-		// are only recoverable if they all belong to the message in progress.
-		switch {
-		case s.discard > 0:
-			if missing > s.discard {
-				s.reset()
-				return msgs, true
-			}
-			s.discard -= missing
-		case len(s.buf) >= 5 && s.buf[0] != 0:
-			size, _, _ := s.sizes()
-			need := size - len(s.buf)
-			if missing > need {
-				s.reset()
-				return msgs, true
-			}
-			msgs = append(msgs, s.message(true))
-			s.buf, s.discard = nil, need-missing
-		default:
-			s.reset()
+		// The kernel didn't copy the last `missing` bytes of this chunk.
+		more, desync := s.skip(missing)
+		msgs = append(msgs, more...)
+		if desync {
 			return msgs, true
 		}
 	}
 	return msgs, false
+}
+
+// skip accounts for n bytes of the stream that were never seen (not copied
+// by the kernel, or a whole capture event skipped). Bytes inside the current
+// message's remainder are skipped without losing alignment (a kept message
+// is reported truncated); anything else means messages were lost, and the
+// stream resynchronises.
+func (s *stream) skip(n int) (msgs []msg, desync bool) {
+	if n <= 0 {
+		return nil, false
+	}
+	if !s.synced {
+		s.buf = nil // waiting for a plausible message start anyway
+		return nil, false
+	}
+	if s.discard >= n {
+		s.discard -= n
+		return nil, false
+	}
+	if s.discard == 0 && len(s.buf) >= 5 && s.buf[0] != 0 {
+		size, _, ok := s.sizes()
+		if need := size - len(s.buf); ok && n <= need {
+			msgs = append(msgs, s.message(true))
+			s.buf, s.discard = nil, need-n
+			return msgs, false
+		}
+	}
+	s.reset()
+	return nil, true
 }
 
 // p0 is the first byte of the message in progress.

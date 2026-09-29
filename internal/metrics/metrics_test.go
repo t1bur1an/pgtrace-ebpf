@@ -158,3 +158,21 @@ func TestConnectionErrorsAndIdle(t *testing.T) {
 		t.Fatalf("idle histogram %d %v", count, sum)
 	}
 }
+
+func TestRecursionMisses(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.RegisterRecursionMisses(func() map[string]uint64 { return map[string]uint64{"exit_recvfrom": 210, "exit_sendto": 2} })
+	mfs, _ := reg.Gather()
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() == "pgtrace_bpf_recursion_misses_total" {
+			for _, mm := range mf.Metric {
+				got[mm.Label[0].GetValue()] = mm.Counter.GetValue()
+			}
+		}
+	}
+	if got["exit_recvfrom"] != 210 || got["exit_sendto"] != 2 {
+		t.Fatalf("got %v", got)
+	}
+}

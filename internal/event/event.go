@@ -25,6 +25,11 @@ type Data struct {
 	Dir      Dir
 	TotalLen uint32
 	Payload  []byte
+	// Seq is the TCP stream offset of the first byte (write_seq for sends,
+	// copied_seq for receives), valid if HasSeq. Consecutive events of one
+	// direction are contiguous unless the capture skipped some.
+	Seq    uint32
+	HasSeq bool
 }
 
 // Connect is an outbound connect() on a socket.

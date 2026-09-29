@@ -276,3 +276,53 @@ func TestFlightRecorderDumpsOnOrphan(t *testing.T) {
 		}
 	}
 }
+
+func seqData(k event.ConnKey, dir event.Dir, ts uint64, seq uint32, p []byte) event.Data {
+	d := data(k, dir, ts, p)
+	d.Seq, d.HasSeq = seq, true
+	return d
+}
+
+// A capture event the kernel skipped (recursion miss) shows up as a jump in
+// the TCP stream offset; the bytes are skipped and the query still traced.
+func TestCaptureGapSkipped(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	met := metrics.New(reg)
+	cm := connmap.New(connmap.Config{ProcRoot: t.TempDir(), PGPort: 5432, ListenPort: 6432, ClientTracing: true})
+	var out []got
+	a := New(cm, func(tr correlate.Trace, info export.ClientInfo) { out = append(out, got{tr, info}) })
+	a.Metrics = met
+	big := msg('D', "\x00\x01\x00\x00\x4e\x20"+strings.Repeat("x", 20000))
+	reply := append(append(append([]byte{}, msg('T', "\x00\x01c\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00")...), big...), resp...)
+	events := make(chan any, 16)
+	events <- event.Accept{Key: client, Addr: peer}
+	events <- event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")}
+	events <- seqData(client, event.DirRecv, 1, 100, q)
+	events <- seqData(server, event.DirSend, 2, 500, q)
+	// Server reply in three reads; the middle one was skipped by the kernel.
+	events <- seqData(server, event.DirRecv, 3, 9000, reply[:4096])
+	events <- seqData(server, event.DirRecv, 5, 9000+8192, reply[8192:])
+	events <- seqData(client, event.DirSend, 6, 700, reply)
+	close(events)
+	a.Run(context.Background(), events)
+	if len(out) != 1 || out[0].tr.Client == nil || len(out[0].tr.Server) != 1 || out[0].tr.Server[0].Q.Rows != 1 {
+		t.Fatalf("got %+v", out)
+	}
+	mfs, _ := reg.Gather()
+	gaps := map[string]float64{}
+	for _, mf := range mfs {
+		for _, m := range mf.Metric {
+			switch mf.GetName() {
+			case "pgtrace_capture_gaps_total":
+				gaps["n"] += m.Counter.GetValue()
+			case "pgtrace_capture_gap_bytes_total":
+				gaps["bytes"] += m.Counter.GetValue()
+			case "pgtrace_parser_resyncs_total":
+				gaps["resync"] += m.Counter.GetValue()
+			}
+		}
+	}
+	if gaps["n"] != 1 || gaps["bytes"] != 4096 || gaps["resync"] != 0 {
+		t.Fatalf("gap metrics %v", gaps)
+	}
+}

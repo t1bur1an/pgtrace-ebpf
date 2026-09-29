@@ -315,3 +315,54 @@ func TestSSLAnswerNotCaptured(t *testing.T) {
 		t.Fatalf("got %+v", r)
 	}
 }
+
+func TestSkipInsideDataRowStaysAligned(t *testing.T) {
+	c := NewConn()
+	feed(c, S, 1, fQuery("select big"))
+	row := bRow(strings.Repeat("x", 20000))
+	be := cat(bRowDesc(), row, bComplete("SELECT 1"), bReady())
+	head := len(bRowDesc()) + 100 // first bytes of the DataRow captured
+	gapEnd := head + 8000         // the kernel skipped 8000 bytes
+	c.Feed(R, 2, be[:head], uint32(head))
+	if r := c.Skip(R, 2, gapEnd-head); r.Resynced {
+		t.Fatal("gap inside a DataRow must not desync")
+	}
+	got := feed(c, R, 3, be[gapEnd:])
+	if len(got) != 1 || got[0].SQL != "select big" || got[0].Rows != 1 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSkipAcrossMessagesResyncs(t *testing.T) {
+	c := NewConn()
+	feed(c, S, 0, fQuery("select 0")) // one exchange, so the reply stream is synced
+	feed(c, R, 0, cat(selectResult(1), bReady()))
+	feed(c, S, 1, fQuery("select 1"))
+	be := cat(selectResult(1), bReady())
+	if r := c.Skip(R, 2, len(be)-3); !r.Resynced {
+		t.Fatal("a gap spanning whole messages must resync")
+	}
+	// The next query is traced normally once the stream resyncs.
+	feed(c, S, 4, fQuery("select 2"))
+	got := feed(c, R, 5, cat(selectResult(1), bReady()))
+	if len(got) != 1 || got[0].SQL != "select 2" {
+		t.Fatalf("after resync: %+v", got)
+	}
+}
+
+func TestSkipTruncatesKeptMessage(t *testing.T) {
+	c := NewClientConn()
+	q := fQuery("select '" + strings.Repeat("y", 3000) + "'")
+	c.Feed(event.DirRecv, 1, q[:1000], 1000)
+	// The gap cuts the query short: Skip reports it, truncated, at the
+	// timestamp of the event that revealed the gap.
+	r := c.Skip(event.DirRecv, 2, 500)
+	if len(r.Started) != 1 || !strings.HasPrefix(r.Started[0].SQL, "select 'yyy") || r.Started[0].TS != 2 {
+		t.Fatalf("started %+v", r.Started)
+	}
+	c.Feed(event.DirRecv, 2, q[1500:], uint32(len(q)-1500))
+	be := cat(selectResult(1), bReady())
+	if d := c.Feed(event.DirSend, 3, be, uint32(len(be))).Done; len(d) != 1 || !d[0].Truncated {
+		t.Fatalf("done %+v", d)
+	}
+}
