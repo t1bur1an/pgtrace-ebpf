@@ -158,7 +158,8 @@ Pushing a tag like `v1.2.3` runs `.github/workflows/release.yml`, which:
   `v1.0.0-rc1`, become pre-releases);
 - pushes the image `ghcr.io/t1bur1an/pgtrace-agent:<version>` (plus
   `:<major>.<minor>` and `:latest` for non-pre-releases) and lists it in the
-  release notes. (`v0.1.0` was published as `ghcr.io/t1bur1an/pgtrace-ebpf`.)
+  release notes. Images are published from `v0.1.1` on; `v0.1.0` has release
+  archives only.
 
 ```bash
 docker pull ghcr.io/t1bur1an/pgtrace-agent:0.1.1
