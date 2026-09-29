@@ -2,6 +2,7 @@ package export
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -295,5 +297,29 @@ func TestExportConnErrorAndIdle(t *testing.T) {
 	e.ExportTrace(tr, sampler.ReasonSlow, ClientInfo{IdleInTx: 5 * time.Second}, func(event.ConnKey) netip.AddrPort { return netip.AddrPort{} })
 	if v := attrs(mem.GetSpans()[0].Attributes)["pgbouncer.idle_in_tx_ms"].AsFloat64(); v != 5000 {
 		t.Fatalf("idle_in_tx_ms %v", v)
+	}
+}
+
+type failing struct{}
+
+func (failing) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error { return errors.New("down") }
+func (failing) Shutdown(context.Context) error                             { return nil }
+
+func TestExportCounters(t *testing.T) {
+	var created, exported, failed int
+	hooks := Hooks{Created: func() { created++ }, Exported: func(n int) { exported += n }, Failed: func() { failed++ }}
+	mem := tracetest.NewInMemoryExporter()
+	e := newWithSpanExporter(counting(mem, hooks), "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
+	e.SetOptions(Options{Hooks: hooks})
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 1"}})
+	e.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 2"}})
+	if created != 2 || exported != 2 || failed != 0 {
+		t.Fatalf("created=%d exported=%d failed=%d", created, exported, failed)
+	}
+	f := newWithSpanExporter(counting(failing{}, hooks), "pgbouncer", func() (int64, int64) { return monoNow, wallNow })
+	f.SetOptions(Options{Hooks: hooks})
+	f.Export(Span{Q: pgwire.Query{Start: 1, End: 2, SQL: "select 3"}})
+	if created != 3 || exported != 2 || failed != 1 {
+		t.Fatalf("after failure: created=%d exported=%d failed=%d", created, exported, failed)
 	}
 }

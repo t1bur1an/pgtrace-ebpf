@@ -144,7 +144,7 @@ host pid namespace.
 | `pgtrace_client_*` | enabled client labels | opt-in (`-metrics-labels`): queries, errors, duration, pool wait per database/user/client IP |
 
 Plus the standard Go and process collectors. Every label is bounded; the
-series ceiling is 2,518 without client labels and 8,952 with the default
+series ceiling is 2,528 without client labels and 8,962 with the default
 label limit. See `docs/metrics.md` for every series and how to size the limit.
 
 ## Releases

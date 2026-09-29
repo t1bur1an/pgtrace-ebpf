@@ -71,6 +71,7 @@ type Metrics struct {
 	conns        *prometheus.GaugeVec
 	corEntries   *prometheus.GaugeVec
 	resyncs      *prometheus.CounterVec
+	exportSpans  *prometheus.CounterVec
 	processes    prometheus.Gauge
 	reg          prometheus.Registerer
 
@@ -132,6 +133,10 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_idle_in_transaction_seconds",
 			Help: "Gaps where a client sat idle inside a transaction, holding its server connection.", Buckets: buckets,
 		}),
+		exportSpans: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pgtrace_export_spans_total",
+			Help: "Spans through the exporter by stage: created, exported (delivered), failed_batches. created - exported = queued or dropped.",
+		}, []string{"stage"}),
 		resyncs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "pgtrace_parser_resyncs_total",
 			Help: "Times a protocol parser lost its place in a connection's byte stream and resynchronised, by side.",
@@ -147,7 +152,7 @@ func NewWith(reg prometheus.Registerer, cfg Config) *Metrics {
 			Name: "pgtrace_traced_processes", Help: "pgbouncer processes being traced.",
 		}),
 	}
-	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.corEntries, m.resyncs, m.conns, m.processes)
+	reg.MustRegister(m.queries, m.duration, m.errors, m.poolWait, m.correlation, m.spans, m.events, m.truncations, m.traceContext, m.connErrors, m.idleInTx, m.corEntries, m.resyncs, m.exportSpans, m.conns, m.processes)
 	if len(cfg.Labels) > 0 {
 		m.registerLabelled()
 	}
@@ -202,7 +207,7 @@ func MaxSeries(cfg Config) int {
 		2*(maxSQLStates+1) + // query_errors_total: side × sqlstate (+OTHER)
 		2*(maxSQLStates+1) + // connection_errors_total: side × sqlstate
 		h + h + // pool_wait_seconds, idle_in_transaction_seconds
-		5 + 5 + 4 + 3 + 3 + 5 + 2 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, connections, traced_processes
+		5 + 5 + 4 + 3 + 3 + 5 + 2 + 3 + 2 + 1 + // correlation, spans, events, truncations, trace_context, correlator_entries, parser_resyncs, export_spans, connections, traced_processes
 		1 + 2 // kernel drops, bpf run time/runs
 	if len(cfg.Labels) > 0 {
 		n += (cfg.Limit+1)*SeriesPerLabelSet + 2 // +1 for 'other'; label_sets, overflow
@@ -345,6 +350,12 @@ func (m *Metrics) ConnectionError(side, code string) {
 }
 func (m *Metrics) SetConnections(side string, n int) { m.conns.WithLabelValues(side).Set(float64(n)) }
 func (m *Metrics) SetTracedProcesses(n int)          { m.processes.Set(float64(n)) }
+
+// ExportHooks feed pgtrace_export_spans_total.
+func (m *Metrics) ExportHooks() (created func(), exported func(int), failed func()) {
+	c, e, f := m.exportSpans.WithLabelValues("created"), m.exportSpans.WithLabelValues("exported"), m.exportSpans.WithLabelValues("failed_batches")
+	return c.Inc, func(n int) { e.Add(float64(n)) }, f.Inc
+}
 
 // ParserResync counts a parser that lost its place on side client/server.
 func (m *Metrics) ParserResync(side string) { m.resyncs.WithLabelValues(side).Inc() }

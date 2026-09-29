@@ -149,7 +149,12 @@ func run(c config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	exp, err := export.New(ctx, c.endpoint, c.service)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
+	created, exported, failed := met.ExportHooks()
+	hooks := export.Hooks{Created: created, Exported: exported, Failed: failed}
+	exp, err := export.New(ctx, c.endpoint, c.service, hooks)
 	if err != nil {
 		return err
 	}
@@ -168,10 +173,7 @@ func run(c config) error {
 	}
 	defer capt.Close()
 
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
-	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }})
+	exp.SetOptions(export.Options{MaxQueryText: c.maxQueryText, OnTruncate: func() { met.Truncation("export") }, Hooks: hooks})
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
 	if c.metricsAddr != "" {
 		mux := http.NewServeMux()

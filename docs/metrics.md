@@ -28,10 +28,13 @@ addresses (`internal/metrics/cardinality_test.go`).
 | `pgtrace_truncations_total` | counter | `layer` = kernel, parser, export | 3 |
 | `pgtrace_trace_context_total` | counter | `result` = linked, not_per_execution, invalid (SQLCommenter) | 3 |
 | `pgtrace_connections` | gauge | `side` = client, server | 2 |
+| `pgtrace_correlator_entries` | gauge | `kind` = queued, held, inflight, unattributed, paramsync | 5 |
+| `pgtrace_parser_resyncs_total` | counter | `side` = client, server: a parser lost its place and resynchronised | 2 |
+| `pgtrace_export_spans_total` | counter | `stage` = created, exported, failed_batches (created − exported = queued or dropped by the batch processor) | 3 |
 | `pgtrace_traced_processes` | gauge | – | 1 |
 | `pgtrace_kernel_drops_total` | counter | – | 1 |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | counter | – (only with `-bpf-stats`) | 2 |
-| **base ceiling** | | | **2 518** |
+| **base ceiling** | | | **2 528** |
 
 The `operation` keywords are SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT,
 END, ROLLBACK, SET, SHOW, WITH, COPY, CREATE, ALTER, DROP, TRUNCATE, VACUUM,
@@ -82,10 +85,10 @@ combination that comes back starts its counters from zero, which Prometheus
 
 | `-metrics-label-limit` | max pgtrace series |
 |---:|---:|
-| labels off | 2 518 |
-| 50 | 4 152 |
-| 200 (default) | 8 952 |
-| 1 000 | 34 552 |
+| labels off | 2 528 |
+| 50 | 4 162 |
+| 200 (default) | 8 962 |
+| 1 000 | 34 562 |
 
 Choose the limit from your Prometheus budget. If
 `pgtrace_metrics_label_overflow_total` keeps rising, there are more active

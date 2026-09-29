@@ -45,12 +45,43 @@ type Exporter struct {
 type Options struct {
 	MaxQueryText int    // db.query.text length cap (DefaultMaxQueryText if 0)
 	OnTruncate   func() // called when db.query.text is shortened
+	Hooks        Hooks
+}
+
+// Hooks observe the export pipeline (all optional). Created and Exported
+// differ by spans still queued or dropped by the batch processor.
+type Hooks struct {
+	Created  func()      // a span was ended and handed to the processor
+	Exported func(n int) // n spans were delivered
+	Failed   func()      // an export batch failed
+}
+
+// countingExporter reports delivered spans and failed batches.
+type countingExporter struct {
+	sdktrace.SpanExporter
+	hooks Hooks
+}
+
+func counting(next sdktrace.SpanExporter, h Hooks) sdktrace.SpanExporter {
+	return countingExporter{next, h}
+}
+
+func (c countingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	err := c.SpanExporter.ExportSpans(ctx, spans)
+	switch {
+	case err != nil && c.hooks.Failed != nil:
+		c.hooks.Failed()
+	case err == nil && c.hooks.Exported != nil:
+		c.hooks.Exported(len(spans))
+	}
+	return err
 }
 
 // DefaultMaxQueryText is the default db.query.text cap in bytes.
 const DefaultMaxQueryText = 2048
 
-// SetOptions must be called before exporting.
+// SetOptions must be called before exporting. Its Hooks.Created is used;
+// Exported/Failed are wired through New.
 func (e *Exporter) SetOptions(o Options) {
 	if o.MaxQueryText <= 0 {
 		o.MaxQueryText = DefaultMaxQueryText
@@ -60,11 +91,12 @@ func (e *Exporter) SetOptions(o Options) {
 
 // New exports over OTLP/HTTP to endpoint, a full URL such as
 // http://victoriatraces:10428/insert/opentelemetry/v1/traces.
-func New(ctx context.Context, endpoint, service string) (*Exporter, error) {
-	sx, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
+func New(ctx context.Context, endpoint, service string, hooks Hooks) (*Exporter, error) {
+	otlp, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
 	if err != nil {
 		return nil, fmt.Errorf("otlp exporter: %w", err)
 	}
+	sx := counting(otlp, hooks)
 	// The batch processor drops spans when its queue is full instead of
 	// blocking, so a slow collector never stalls capture.
 	bsp := sdktrace.NewBatchSpanProcessor(sx,
@@ -315,7 +347,12 @@ func (e *Exporter) start(ctx context.Context, kind trace.SpanKind, q pgwire.Quer
 	if q.ErrorCode != "" {
 		span.SetStatus(codes.Error, clean(q.ErrorMessage, DefaultMaxQueryText))
 	}
-	return ctx, func() { span.End(trace.WithTimestamp(e.wall(q.End))) }
+	return ctx, func() {
+		span.End(trace.WithTimestamp(e.wall(q.End)))
+		if e.opts.Hooks.Created != nil {
+			e.opts.Hooks.Created()
+		}
+	}
 }
 
 func (e *Exporter) span(ctx context.Context, kind trace.SpanKind, q pgwire.Query, attrs []attribute.KeyValue) {
