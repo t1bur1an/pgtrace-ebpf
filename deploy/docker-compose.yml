@@ -55,6 +55,7 @@ services:
       PGTRACE_ATTACH_PARAM_SYNC: "${PGTRACE_ATTACH_PARAM_SYNC:-true}"
       PGTRACE_PPROF: "${PGTRACE_PPROF:-false}"
       PGTRACE_DEBUG_DUMP_DIR: "${PGTRACE_DEBUG_DUMP_DIR:-}"
+      PGTRACE_TLS_CAPTURE: "${PGTRACE_TLS_CAPTURE:-false}"
     ports:
       - "9464:9464"
     volumes:

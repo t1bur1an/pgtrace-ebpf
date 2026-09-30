@@ -11,20 +11,25 @@ import (
 // headerSize is offsetof(struct event, payload) in bpf/pgtrace.bpf.c.
 const headerSize = 56
 
-const flagSeq = 1
+const (
+	flagSeq = 1
+	flagTLS = 2
+)
 
 const (
 	kindData    = 0
 	kindConnect = 1
 	kindClose   = 2
 	kindAccept  = 3
+	kindTLSFD   = 4
+	kindTLSInfo = 5
 
 	afUnix  = 1
 	afInet  = 2
 	afInet6 = 10
 )
 
-// decode turns one ringbuf record into event.Data, event.Connect or event.Close.
+// decode turns one ringbuf record into an event.Data, Connect, Accept, Close, TLSFD or TLSAttr.
 func decode(raw []byte) (any, error) {
 	if len(raw) < headerSize {
 		return nil, fmt.Errorf("short record: %d bytes", len(raw))
@@ -38,15 +43,36 @@ func decode(raw []byte) (any, error) {
 		if headerSize+capLen > len(raw) {
 			return nil, fmt.Errorf("cap_len %d exceeds record of %d bytes", capLen, len(raw))
 		}
-		return event.Data{
+		flags := le.Uint32(raw[52:])
+		d := event.Data{
 			TS:       ts,
 			Key:      key,
 			Dir:      event.Dir(raw[25]),
 			TotalLen: le.Uint32(raw[16:]),
 			Payload:  append([]byte(nil), raw[headerSize:headerSize+capLen]...),
 			Seq:      le.Uint32(raw[48:]),
-			HasSeq:   le.Uint32(raw[52:])&flagSeq != 0,
-		}, nil
+			HasSeq:   flags&flagSeq != 0,
+			TLS:      flags&flagTLS != 0,
+		}
+		if d.TLS && key.FD < 0 {
+			d.Session = le.Uint64(raw[32:])
+		}
+		return d, nil
+	case kindTLSFD:
+		return event.TLSFD{TS: ts, Key: key, Session: le.Uint64(raw[32:])}, nil
+	case kindTLSInfo:
+		capLen := int(le.Uint32(raw[20:]))
+		if headerSize+capLen > len(raw) {
+			return nil, fmt.Errorf("cap_len %d exceeds record of %d bytes", capLen, len(raw))
+		}
+		a := event.TLSAttr{TS: ts, Key: key, Session: le.Uint64(raw[32:])}
+		s := string(raw[headerSize : headerSize+capLen])
+		if raw[25] == 0 {
+			a.Version = s
+		} else {
+			a.Cipher = s
+		}
+		return a, nil
 	case kindConnect:
 		addr, err := sockAddr(raw)
 		if err != nil {

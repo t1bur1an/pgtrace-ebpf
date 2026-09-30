@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -203,6 +204,54 @@ func TestExportStages(t *testing.T) {
 	for k, v := range want {
 		if got[k] != v {
 			t.Fatalf("%s = %v, want %v (all: %v)", k, got[k], v, got)
+		}
+	}
+}
+
+func TestTLSMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewWith(reg, Config{TLS: true})
+	m.SetConnections("client", true, 3)
+	m.SetConnections("client", false, 2)
+	m.TLSUnresolved("resolved")
+	m.TLSUnresolved("resolved")
+	m.TLSUnresolved("dropped")
+	m.RegisterTLS(func() (int, int) { return 2, 1 }, func() bool { return true })
+	got := map[string]float64{}
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		for _, mm := range mf.Metric {
+			key := mf.GetName()
+			for _, l := range mm.Label {
+				key += "," + l.GetName() + "=" + l.GetValue()
+			}
+			got[key] = mm.GetGauge().GetValue() + mm.GetCounter().GetValue()
+		}
+	}
+	want := map[string]float64{
+		"pgtrace_connections,side=client,tls=true":     3,
+		"pgtrace_connections,side=client,tls=false":    2,
+		"pgtrace_tls_unresolved_total,result=resolved": 2,
+		"pgtrace_tls_unresolved_total,result=dropped":  1,
+		"pgtrace_tls_processes,state=attached":         2,
+		"pgtrace_tls_processes,state=unsupported":      1,
+		"pgtrace_tls_fallback_attached":                1,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v", k, got[k], v)
+		}
+	}
+}
+
+func TestTLSUnresolvedNoopWithoutTLS(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.TLSUnresolved("dropped")
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		if strings.HasPrefix(mf.GetName(), "pgtrace_tls_") {
+			t.Fatalf("%s registered without TLS capture", mf.GetName())
 		}
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
-	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -59,6 +58,7 @@ type config struct {
 	attachParamSync    bool
 	pprof              bool
 	debugDumpDir       string
+	tlsCapture         bool
 	exportWorkers      int
 	exportBatch        int
 	exportQueue        int
@@ -95,6 +95,7 @@ func main() {
 	flag.StringVar(&c.debugDumpDir, "debug-dump-dir", "", "diagnostics: keep recent events per connection and dump them here when a server query is orphaned")
 	flag.BoolVar(&c.pprof, "pprof", false, "serve Go profiling endpoints at /debug/pprof/ on -metrics-addr (diagnostics only)")
 	flag.BoolVar(&c.attachParamSync, "attach-param-sync", true, "attach pgbouncer's parameter-sync SET/RESET statements to the client query they precede")
+	flag.BoolVar(&c.tlsCapture, "tls-capture", false, "capture plaintext of pgbouncer's TLS connections with uprobes on its libssl (costs pgbouncer CPU per TLS query)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -159,7 +160,7 @@ func run(c config) error {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL})
+	met := metrics.NewWith(reg, metrics.Config{Labels: labels, Limit: c.labelLimit, TTL: c.labelTTL, TLS: c.tlsCapture})
 	created, exported, failed, dropped := met.ExportHooks()
 	exp, err := export.New(export.Config{
 		Endpoint: c.endpoint, Service: c.service,
@@ -180,7 +181,7 @@ func run(c config) error {
 	}()
 
 	capt, err := capture.Start(ctx, capture.Config{Comm: c.comm, ProcRoot: c.procRoot, RescanEvery: 5 * time.Second,
-		BPFStats: c.bpfStats, CaptureBytes: c.captureBytes})
+		BPFStats: c.bpfStats, CaptureBytes: c.captureBytes, TLS: c.tlsCapture})
 	if err != nil {
 		return fmt.Errorf("start capture (needs CAP_BPF/CAP_PERFMON or privileged): %w", err)
 	}
@@ -188,6 +189,9 @@ func run(c config) error {
 
 	met.RegisterKernel(capt.Drops, capt.ProgStats, c.bpfStats)
 	met.RegisterRecursionMisses(capt.RecursionMisses)
+	if c.tlsCapture {
+		met.RegisterTLS(capt.TLSProcesses, capt.TLSFallbackAttached)
+	}
 	if c.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -209,9 +213,13 @@ func run(c config) error {
 	cm := connmap.New(connmap.Config{ProcRoot: c.procRoot, PGPort: uint16(c.pgPort), ListenPort: uint16(c.listenPort), ClientTracing: c.clientTracing})
 	// Peek, not Lookup: an orphan's server may already be closed, and
 	// resolving its fd number again could cache a reused fd's details.
-	serverAddr := func(k event.ConnKey) netip.AddrPort { info, _ := cm.Peek(k); return info.Remote }
+	var ag *agent.Agent
+	serverConn := func(k event.ConnKey) export.ServerConn {
+		info, _ := cm.Peek(k)
+		return export.ServerConn{Addr: info.Remote, TLS: ag.TLSInfo(k)}
+	}
 	smp := sampler.New(c.ratio, time.Duration(c.slowMS)*time.Millisecond, uint64(time.Now().UnixNano()))
-	ag := agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
+	ag = agent.New(cm, func(tr correlate.Trace, client export.ClientInfo) {
 		met.ObserveTrace(tr, metricsClient(client))
 		if c.sqlcommenter && tr.Client != nil {
 			client = withComment(client, tr.Client.Q, met)
@@ -219,11 +227,14 @@ func run(c config) error {
 		keep, reason := smp.DecideTraceIdle(tr, c.parentSampling && client.UseParent && export.Sampled(client.Comment), client.IdleInTx)
 		met.SpanDecision(reason, keep)
 		if keep {
-			exp.ExportTrace(tr, reason, client, serverAddr)
+			exp.ExportTrace(tr, reason, client, serverConn)
 		}
 	})
 	ag.Filter = capt
 	ag.Metrics = met
+	if c.tlsCapture {
+		ag.Fallback = capt
+	}
 	ag.Parser = pgwire.Options{MaxMessage: c.maxMessage}
 	ag.OnConnError = exp.ExportConnError // always exported: errors are always kept
 	ag.SetAttachParamSync(c.attachParamSync)
@@ -231,7 +242,7 @@ func run(c config) error {
 	slog.Info("attached", "version", version, "comm", c.comm, "pids", capt.Pids(), "client_tracing", c.clientTracing,
 		"sample_ratio", c.ratio, "slow_ms", c.slowMS, "endpoint", c.endpoint, "metrics", c.metricsAddr,
 		"capture_bytes", c.captureBytes, "max_message_bytes", c.maxMessage, "max_query_text", c.maxQueryText,
-		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync)
+		"metrics_labels", labels, "metrics_label_limit", c.labelLimit, "sqlcommenter", c.sqlcommenter, "attach_param_sync", c.attachParamSync, "tls_capture", c.tlsCapture)
 
 	go func() {
 		t := time.NewTicker(c.statsEvery)
@@ -244,11 +255,13 @@ func run(c config) error {
 				st, ss, cs := ag.Stats(), smp.Stats(), ag.CorrelationStats()
 				met.SetTracedProcesses(len(capt.Pids()))
 				met.Evict()
-				met.SetConnections("server", int(st.Server))
-				met.SetConnections("client", int(st.Client))
+				met.SetConnections("server", true, int(st.ServerTLS))
+				met.SetConnections("server", false, int(st.ServerPlain()))
+				met.SetConnections("client", true, int(st.ClientTLS))
+				met.SetConnections("client", false, int(st.ClientPlain()))
 				bpfTime, bpfRuns := capt.ProgStats()
 				slog.Info("stats", "events", st.Events, "queries", st.Queries,
-					"server_conns", st.Server, "client_conns", st.Client, "traces", ss["seen"],
+					"server_conns", st.Server, "client_conns", st.Client, "server_tls", st.ServerTLS, "client_tls", st.ClientTLS, "traces", ss["seen"],
 					"kept_error", ss["kept_error"], "kept_slow", ss["kept_slow"], "kept_parent", ss["kept_parent"], "kept_ratio", ss["kept_ratio"],
 					"corr_exact", cs[correlate.Exact], "corr_inferred", cs[correlate.Inferred], "corr_none", cs[correlate.None],
 					"corr_internal", cs["internal"], "corr_orphan", cs["orphan"],

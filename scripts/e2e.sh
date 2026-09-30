@@ -49,4 +49,4 @@ sleep 8
 stats=$(docker compose logs agent | grep "INFO stats" | tail -1)
 echo "agent: ${stats#*INFO }"
 
-python3 ../scripts/e2e_check.py --ratio "$RATIO" --min-traces $((CLIENTS * TX * 7 * 3)) --stats "$stats"
+python3 ../scripts/e2e_check.py --ratio "$RATIO" --min-traces $((CLIENTS * TX * 7 * 3)) --stats "$stats" --ceiling "${SERIES_CEILING:-8975}"

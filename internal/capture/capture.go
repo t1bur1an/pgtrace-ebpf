@@ -31,6 +31,9 @@ type Config struct {
 	// CaptureBytes is the most payload bytes copied per send/recv call
 	// (DefaultCaptureBytes if 0, at most MaxCaptureBytes).
 	CaptureBytes int
+	// TLS captures the plaintext of pgbouncer's TLS connections (uprobes on
+	// its libssl).
+	TLS bool
 }
 
 const (
@@ -73,6 +76,8 @@ type Capture struct {
 
 	mu   sync.Mutex
 	pids map[uint32]bool
+
+	tls *tlsCapture // nil unless Config.TLS
 }
 
 func Start(ctx context.Context, cfg Config) (*Capture, error) {
@@ -108,6 +113,17 @@ func Start(ctx context.Context, cfg Config) (*Capture, error) {
 		}
 		c.links = append(c.links, l)
 		c.progs = append(c.progs, prog)
+	}
+	if cfg.TLS {
+		t, err := newTLSCapture(c, cfg.ProcRoot, cfg.CaptureBytes)
+		if err != nil {
+			c.Close()
+			return nil, err
+		}
+		c.tls = t
+		c.progs = append(c.progs, t.programs()...)
+		// Sessions that already exist need the fallback to find their sockets.
+		t.need(time.Now())
 	}
 	// Run-time accounting costs two clock reads per program run; it is only
 	// used for the stats log, so failure to enable it is not fatal.
@@ -212,6 +228,10 @@ func (c *Capture) rescan(cfg Config) {
 		}
 	}
 	c.pids = found
+	if c.tls != nil {
+		c.tls.sync(found, time.Now())
+		c.tls.expire(time.Now())
+	}
 }
 
 // Pids returns the currently traced pids.
@@ -291,5 +311,29 @@ func (c *Capture) Close() error {
 		c.reader.Close()
 	}
 	c.wg.Wait()
+	// After the rescan goroutine stopped: it attaches TLS probes.
+	if c.tls != nil {
+		c.tls.close()
+	}
 	return c.objs.Close()
 }
+
+// TLSNeedFallback is called when TLS plaintext arrives for a session whose
+// socket isn't known: it attaches the socket-finding fallback, or keeps it.
+func (c *Capture) TLSNeedFallback() {
+	if c.tls != nil {
+		c.tls.need(time.Now())
+	}
+}
+
+// TLSProcesses returns how many traced processes have TLS probes attached,
+// and how many can't be TLS-captured.
+func (c *Capture) TLSProcesses() (attached, unsupported int) {
+	if c.tls == nil {
+		return 0, 0
+	}
+	return c.tls.counts()
+}
+
+// TLSFallbackAttached reports whether the fallback is attached.
+func (c *Capture) TLSFallbackAttached() bool { return c.tls != nil && c.tls.fallbackAttached() }

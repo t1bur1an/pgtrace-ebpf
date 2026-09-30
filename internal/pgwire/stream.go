@@ -88,6 +88,7 @@ type stream struct {
 	frontend  bool
 	synced    bool
 	expectSSL bool   // backend: next byte is the single-byte SSL/GSS reply
+	tls       bool   // backend: consumed an 'S' answer; the rest of the connection is TLS
 	keep      int    // most bytes of one message kept (header included)
 	buf       []byte // the message in progress; sized once its length is known
 	discard   int    // bytes of the current message still to be skipped
@@ -183,6 +184,7 @@ func (s *stream) feed(p []byte, total int) (msgs []msg, desync bool) {
 			// may send it through a syscall that isn't captured, so only
 			// consume it if that's what this byte is.
 			if p[0] == 'N' || p[0] == 'S' || p[0] == 'G' {
+				s.tls = s.tls || p[0] == 'S'
 				p = p[1:]
 			}
 			s.expectSSL = false

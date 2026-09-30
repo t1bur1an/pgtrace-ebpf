@@ -234,6 +234,37 @@ func TestSSLRequestRefused(t *testing.T) {
 	if len(got) != 1 || got[0].SQL != "select 1" {
 		t.Fatalf("got %+v", got)
 	}
+	if c.TLS() {
+		t.Fatal("TLS() true after an 'N' answer")
+	}
+}
+
+func TestSSLAcceptedThenPlaintext(t *testing.T) {
+	c := NewConn()
+	feed(c, S, 1, sslRequest())
+	feed(c, R, 2, []byte{'S'})
+	if !c.TLS() {
+		t.Fatal("TLS() false after an 'S' answer")
+	}
+	// With TLS capture the next events on the socket are the plaintext.
+	feed(c, S, 3, startup("app"))
+	feed(c, R, 4, cat(bAuthOK(), bReady()))
+	feed(c, S, 5, fQuery("select 1"))
+	got := feed(c, R, 6, cat(selectResult(1), bReady()))
+	if len(got) != 1 || got[0].SQL != "select 1" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSSLAcceptedClientSide(t *testing.T) {
+	c := NewClientConn()
+	c.Feed(R, 1, sslRequest(), 8)
+	c.Feed(S, 2, []byte{'S'}, 1)
+	p := startupParams("user", "alice", "database", "shop")
+	c.Feed(R, 3, p, uint32(len(p)))
+	if !c.TLS() || c.Params()["user"] != "alice" {
+		t.Fatalf("tls=%v params=%v", c.TLS(), c.Params())
+	}
 }
 
 func TestOperation(t *testing.T) {

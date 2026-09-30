@@ -138,7 +138,7 @@ func drain(t *testing.T, e *Exporter) {
 	}
 }
 
-func noAddr(event.ConnKey) netip.AddrPort { return netip.AddrPort{} }
+func noAddr(event.ConnKey) ServerConn { return ServerConn{} }
 
 func TestExportSpan(t *testing.T) {
 	e, col, _ := newTest(t, nil)
@@ -222,7 +222,7 @@ func TestExportTrace(t *testing.T) {
 		},
 	}
 	info := ClientInfo{Addr: netip.MustParseAddrPort("10.0.0.9:40000"), Params: map[string]string{"user": "alice", "database": "shop", "application_name": "api"}, IdleInTx: 5 * time.Second}
-	e.ExportTrace(tr, sampler.ReasonError, info, func(event.ConnKey) netip.AddrPort { return netip.MustParseAddrPort("10.0.0.2:5432") })
+	e.ExportTrace(tr, sampler.ReasonError, info, func(event.ConnKey) ServerConn { return ServerConn{Addr: netip.MustParseAddrPort("10.0.0.2:5432")} })
 	drain(t, e)
 	spans := col.spans()
 	if len(spans) != 3 {
@@ -458,5 +458,44 @@ func TestQueueSlotIsSmall(t *testing.T) {
 	defer drain(t, e)
 	if s := reflect.TypeOf(e.jobs).Elem().Size(); s > 8 {
 		t.Fatalf("queue slot is %d bytes", s)
+	}
+}
+
+func TestExportTLSAttributes(t *testing.T) {
+	e, col, _ := newTest(t, nil)
+	tr := correlate.Trace{
+		Client: &correlate.ClientQuery{Key: event.ConnKey{PID: 1, FD: 11}, Q: pgwire.Query{Start: 1, End: 10, SQL: "select 1", Operation: "SELECT"}},
+		Server: []correlate.ServerQuery{{Key: event.ConnKey{PID: 1, FD: 7}, Correlation: "exact", Q: pgwire.Query{Start: 2, End: 9, SQL: "select 1", Operation: "SELECT"}}},
+	}
+	info := ClientInfo{TLS: TLSInfo{On: true, Version: "1.3", Cipher: "TLS_AES_256_GCM_SHA384" + strings.Repeat("x", 100)}}
+	// Client hop TLS, server hop plain.
+	e.ExportTrace(tr, sampler.ReasonRatio, info, func(event.ConnKey) ServerConn { return ServerConn{} })
+	e.ExportConnError(ConnError{Client: true, Key: event.ConnKey{PID: 1, FD: 12}, End: 5, Code: "28P01", TLS: TLSInfo{On: true}})
+	drain(t, e)
+	var root, child, conn map[string]*commonpb.AnyValue
+	for _, s := range col.spans() {
+		switch {
+		case s.Name == "connect":
+			conn = spanAttrs(s.Span)
+		case s.Kind == tracepb.Span_SPAN_KIND_SERVER:
+			root = spanAttrs(s.Span)
+		default:
+			child = spanAttrs(s.Span)
+		}
+	}
+	if root["tls.protocol.name"].GetStringValue() != "tls" || root["tls.protocol.version"].GetStringValue() != "1.3" ||
+		len(root["tls.cipher"].GetStringValue()) != 64 {
+		t.Fatalf("root %v", root)
+	}
+	for _, k := range []string{"tls.protocol.name", "tls.protocol.version", "tls.cipher"} {
+		if _, ok := child[k]; ok {
+			t.Fatalf("plain server hop has %s", k)
+		}
+	}
+	if conn["tls.protocol.name"].GetStringValue() != "tls" {
+		t.Fatalf("connect span %v", conn)
+	}
+	if _, ok := conn["tls.protocol.version"]; ok {
+		t.Fatal("unknown version exported")
 	}
 }

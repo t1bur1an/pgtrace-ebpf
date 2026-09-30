@@ -33,6 +33,20 @@ type Stats struct {
 	Queries uint64 // queries parsed on either side, before sampling
 	Server  uint64 // server connections currently tracked
 	Client  uint64 // client connections currently tracked
+
+	ServerTLS, ClientTLS uint64 // …of which use TLS
+}
+
+// ServerPlain and ClientPlain are the connections without TLS. The counters
+// are read without a lock, so a TLS count may briefly exceed its total.
+func (s Stats) ServerPlain() uint64 { return plain(s.Server, s.ServerTLS) }
+func (s Stats) ClientPlain() uint64 { return plain(s.Client, s.ClientTLS) }
+
+func plain(total, tls uint64) uint64 {
+	if tls > total {
+		return 0
+	}
+	return total - tls
 }
 
 // Filter lets the agent tell the kernel which fds need no payload capture.
@@ -57,6 +71,9 @@ type conn struct {
 
 	nextSeq [2]uint32 // expected TCP stream offset per direction
 	haveSeq [2]bool
+
+	tls                   bool // negotiated TLS ('S' answer, or TLS events)
+	tlsVersion, tlsCipher string
 }
 
 type recorded struct {
@@ -71,12 +88,18 @@ type recorded struct {
 
 const recorderEvents, recorderBytes = 64, 1024
 
+// TLSFallback is told when TLS plaintext arrives for a session whose socket
+// isn't known yet, so the capture can attach its socket-finding fallback.
+type TLSFallback interface{ TLSNeedFallback() }
+
 type Agent struct {
 	Filter  Filter           // optional
 	Metrics *metrics.Metrics // optional: event counts, truncations
 	Parser  pgwire.Options   // per-connection parser options
 	// OnConnError receives errors that arrive with no query in flight.
 	OnConnError func(export.ConnError)
+	// Fallback, if set, is told about TLS events without a socket.
+	Fallback TLSFallback
 	// DumpDir enables the flight recorder: the last events of every
 	// connection are kept, and the first orphaned query of a server
 	// connection dumps both connections' history there (diagnostics).
@@ -89,11 +112,16 @@ type Agent struct {
 	conns  map[event.ConnKey]*conn
 	opened map[event.ConnKey]uint64 // accept/connect time of sockets without data yet
 
+	held       map[uint32]event.Data           // pid → SSL_write event waiting for its socket
+	tlsPending map[event.ConnKey]event.TLSAttr // version/cipher that arrived before the connection's first data
+
 	events, queries, nserver, nclient atomic.Uint64
+	nserverTLS, nclientTLS            atomic.Uint64
 }
 
 func New(cm *connmap.Map, sink Sink) *Agent {
-	a := &Agent{cm: cm, sink: sink, conns: map[event.ConnKey]*conn{}, opened: map[event.ConnKey]uint64{}}
+	a := &Agent{cm: cm, sink: sink, conns: map[event.ConnKey]*conn{}, opened: map[event.ConnKey]uint64{},
+		held: map[uint32]event.Data{}, tlsPending: map[event.ConnKey]event.TLSAttr{}}
 	a.cor = correlate.New(a.emit, HoldTimeout)
 	return a
 }
@@ -109,7 +137,7 @@ func (a *Agent) emit(tr correlate.Trace) {
 	info := export.ClientInfo{}
 	if tr.Client != nil {
 		if c := a.conns[tr.Client.Key]; c != nil {
-			info = export.ClientInfo{Addr: c.addr, Params: c.p.Params(), IdleInTx: c.idle[tr.Client.Q.ID]}
+			info = export.ClientInfo{Addr: c.addr, Params: c.p.Params(), IdleInTx: c.idle[tr.Client.Q.ID], TLS: c.tlsInfo()}
 			delete(c.idle, tr.Client.Q.ID)
 		}
 	}
@@ -153,15 +181,20 @@ func (a *Agent) event(kind string) {
 }
 
 func (a *Agent) handle(ev any) {
+	if len(a.held) > 0 {
+		a.settle(ev)
+	}
 	switch ev := ev.(type) {
 	case event.Connect:
 		a.event("connect")
+		delete(a.tlsPending, ev.Key) // a new socket on this fd number
 		a.drop(ev.Key)
 		a.cm.OnConnect(ev.Key, ev.Addr)
 		a.opened[ev.Key] = ev.TS
 		a.classified(ev.Key)
 	case event.Accept:
 		a.event("accept")
+		delete(a.tlsPending, ev.Key)
 		a.drop(ev.Key)
 		a.cm.OnAccept(ev.Key, ev.Addr)
 		a.opened[ev.Key] = ev.TS
@@ -172,6 +205,7 @@ func (a *Agent) handle(ev any) {
 			a.Metrics.IdleInTransaction(time.Duration(ev.TS - c.inTxSince)) // closed while holding a transaction
 		}
 		delete(a.opened, ev.Key)
+		delete(a.tlsPending, ev.Key)
 		a.drop(ev.Key)
 		a.cm.OnClose(ev.Key)
 		// Also undoes an Ignore issued for this fd number by data events that
@@ -179,7 +213,158 @@ func (a *Agent) handle(ev any) {
 		a.clear(ev.Key)
 	case event.Data:
 		a.event("data")
+		if ev.TLS && ev.Key.FD < 0 {
+			a.unresolved(ev)
+			return
+		}
 		a.data(ev)
+	case event.TLSFD:
+		a.events.Add(1) // a held event was settled above
+		// The fallback found a pre-existing session's socket; more of them
+		// may be waiting, so keep it attached.
+		if a.Fallback != nil {
+			a.Fallback.TLSNeedFallback()
+		}
+	case event.TLSAttr:
+		a.events.Add(1)
+		a.tlsAttr(ev)
+	}
+}
+
+func pidOf(ev any) (uint32, bool) {
+	switch ev := ev.(type) {
+	case event.Data:
+		return ev.Key.PID, true
+	case event.Connect:
+		return ev.Key.PID, true
+	case event.Accept:
+		return ev.Key.PID, true
+	case event.Close:
+		return ev.Key.PID, true
+	case event.TLSFD:
+		return ev.Key.PID, true
+	case event.TLSAttr:
+		return ev.Key.PID, true
+	}
+	return 0, false
+}
+
+// settle feeds or drops the held SSL_write event of ev's process. Only the
+// socket mapping from the same SSL_write call may follow it: pgbouncer is
+// single-threaded, so anything else means the mapping isn't coming, and
+// feeding the event later would reorder it against other connections.
+func (a *Agent) settle(ev any) {
+	pid, ok := pidOf(ev)
+	if !ok {
+		return
+	}
+	h, ok := a.held[pid]
+	if !ok {
+		return
+	}
+	delete(a.held, pid)
+	if m, ok := ev.(event.TLSFD); ok && m.Session == h.Session {
+		h.Key.FD, h.Session = m.Key.FD, 0
+		a.tlsUnresolved("resolved")
+		a.data(h)
+		return
+	}
+	a.tlsUnresolved("dropped")
+}
+
+// unresolved handles TLS plaintext captured before its socket was known.
+func (a *Agent) unresolved(ev event.Data) {
+	if a.Fallback != nil {
+		a.Fallback.TLSNeedFallback()
+	}
+	if ev.Dir != event.DirSend {
+		// SSL_read: its ciphertext read already happened; the next call on
+		// the session will be mapped.
+		a.tlsUnresolved("dropped")
+		return
+	}
+	a.held[ev.Key.PID] = ev
+}
+
+func (a *Agent) tlsUnresolved(result string) {
+	if a.Metrics != nil {
+		a.Metrics.TLSUnresolved(result)
+	}
+}
+
+// tlsAttr records a session's TLS version or cipher.
+func (a *Agent) tlsAttr(ev event.TLSAttr) {
+	if ev.Key.FD < 0 {
+		return
+	}
+	if c := a.conns[ev.Key]; c != nil {
+		c.setTLSAttr(ev)
+		a.markTLS(c)
+		return
+	}
+	p := a.tlsPending[ev.Key]
+	if ev.Version != "" {
+		p.Version = ev.Version
+	}
+	if ev.Cipher != "" {
+		p.Cipher = ev.Cipher
+	}
+	a.tlsPending[ev.Key] = p
+}
+
+func (c *conn) setTLSAttr(ev event.TLSAttr) {
+	if ev.Version != "" {
+		c.tlsVersion = tlsVersion(ev.Version)
+	}
+	if ev.Cipher != "" {
+		c.tlsCipher = ev.Cipher
+	}
+}
+
+// tlsVersion turns OpenSSL's version name into the OpenTelemetry value:
+// "TLSv1.3" → "1.3", "TLSv1" → "1.0".
+func tlsVersion(s string) string {
+	v, ok := strings.CutPrefix(s, "TLSv")
+	if !ok {
+		return s
+	}
+	if v == "1" {
+		return "1.0"
+	}
+	return v
+}
+
+func (c *conn) tlsInfo() export.TLSInfo {
+	if !c.tls {
+		return export.TLSInfo{}
+	}
+	return export.TLSInfo{On: true, Version: c.tlsVersion, Cipher: c.tlsCipher}
+}
+
+// markTLS records that a connection uses TLS.
+func (a *Agent) markTLS(c *conn) {
+	if c.tls {
+		return
+	}
+	c.tls = true
+	a.countTLS(c.side, 1)
+}
+
+// TLSInfo returns a tracked connection's TLS. Call it from the Run
+// goroutine, e.g. inside the sink.
+func (a *Agent) TLSInfo(k event.ConnKey) export.TLSInfo {
+	if c := a.conns[k]; c != nil {
+		return c.tlsInfo()
+	}
+	return export.TLSInfo{}
+}
+
+func (a *Agent) countTLS(side connmap.Side, delta int64) {
+	switch side {
+	case connmap.SideServer:
+		a.nserverTLS.Add(uint64(delta))
+	case connmap.SideClient:
+		a.nclientTLS.Add(uint64(delta))
 	}
 }
 
@@ -210,6 +395,9 @@ func (a *Agent) drop(k event.ConnKey) {
 	case connmap.SideServer:
 		a.cor.ServerClosed(k)
 	}
+	if c.tls {
+		a.countTLS(c.side, -1)
+	}
 	delete(a.conns, k)
 	a.count(c.side, -1)
 }
@@ -235,6 +423,14 @@ func (a *Agent) data(ev event.Data) {
 		c.idle = map[uint64]time.Duration{}
 		a.conns[ev.Key] = c
 		a.count(c.side, 1)
+		if p, ok := a.tlsPending[ev.Key]; ok {
+			c.setTLSAttr(p)
+			a.markTLS(c)
+			delete(a.tlsPending, ev.Key)
+		}
+	}
+	if ev.TLS {
+		a.markTLS(c)
 	}
 	if a.DumpDir != "" {
 		r := recorded{ts: ev.TS, dir: ev.Dir, total: ev.TotalLen, captured: len(ev.Payload), seq: ev.Seq, hasSeq: ev.HasSeq, head: append([]byte(nil), ev.Payload[:min(len(ev.Payload), recorderBytes)]...)}
@@ -264,6 +460,9 @@ func (a *Agent) data(ev event.Data) {
 		c.nextSeq[d], c.haveSeq[d] = ev.Seq+ev.TotalLen, true
 	}
 	a.process(ev, c, pid, side, c.p.Feed(ev.Dir, ev.TS, ev.Payload, ev.TotalLen))
+	if !c.tls && c.p.TLS() {
+		a.markTLS(c) // the server accepted an SSLRequest
+	}
 }
 
 // process hands one parser result to the correlator and metrics.
@@ -316,7 +515,7 @@ func (a *Agent) process(ev event.Data, c *conn, pid uint32, side string, r pgwir
 		}
 		if a.OnConnError != nil {
 			a.OnConnError(export.ConnError{Client: c.side == connmap.SideClient, Key: ev.Key, Start: c.start, End: ce.TS,
-				Code: ce.Code, Message: ce.Message, Addr: c.addr, Params: c.p.Params()})
+				Code: ce.Code, Message: ce.Message, Addr: c.addr, Params: c.p.Params(), TLS: c.tlsInfo()})
 		}
 	}
 }
@@ -344,7 +543,8 @@ func (a *Agent) clear(k event.ConnKey) {
 }
 
 func (a *Agent) Stats() Stats {
-	return Stats{Events: a.events.Load(), Queries: a.queries.Load(), Server: a.nserver.Load(), Client: a.nclient.Load()}
+	return Stats{Events: a.events.Load(), Queries: a.queries.Load(), Server: a.nserver.Load(), Client: a.nclient.Load(),
+		ServerTLS: a.nserverTLS.Load(), ClientTLS: a.nclientTLS.Load()}
 }
 
 // SetAttachParamSync toggles attaching pgbouncer's parameter-sync statements

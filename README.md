@@ -73,6 +73,7 @@ Contention: `docs/contention.md`.
 
 ```bash
 make e2e                  # builds, starts the stack, generates traffic, verifies traces, metrics and Grafana
+./scripts/e2e_tls.sh      # the same over TLS (-tls-capture): strict, mixed TLS/plain, pre-existing sessions, restart
 ./scripts/contention.sh   # deadlocks, lock waits, timeouts, pool exhaustion, idle-in-transaction, rejected logins
 ./scripts/soak.sh         # 90-minute soak with big JSON statements (DURATION=seconds)
 ```
@@ -128,6 +129,7 @@ Flags (or `PGTRACE_<FLAG>` env, e.g. `PGTRACE_SAMPLE_RATIO`):
 | `-sqlcommenter` | `true` | read SQLCommenter comments; a `traceparent` parents the pgbouncer span |
 | `-sqlcommenter-parent-sampling` | `true` | always keep traces whose SQLCommenter parent is sampled |
 | `-attach-param-sync` | `true` | attach pgbouncer's parameter-sync `SET`/`RESET` statements (e.g. `SET application_name`) to the client query they precede, as internal children |
+| `-tls-capture` | `false` | trace TLS connections: capture plaintext with uprobes on pgbouncer's libssl (OpenSSL 3, dynamically linked). Costs pgbouncer CPU on every TLS query; see `docs/performance.md` |
 
 The image sets `GOMEMLIMIT=768MiB`, a soft memory cap for the Go runtime;
 override it with `-e` to match the agent's memory budget. It is built on
@@ -154,7 +156,9 @@ host pid namespace.
 | `pgtrace_bpf_recursion_misses_total` | `program` | BPF runs the kernel skipped (recursion protection) |
 | `pgtrace_export_spans_total` | `stage` | created / exported / dropped (export queue full) / failed_batches |
 | `pgtrace_export_queue_length` | | traces waiting for an export worker |
-| `pgtrace_connections` | `side` | tracked sockets |
+| `pgtrace_connections` | `side`, `tls` | tracked sockets; `tls="true"` also without `-tls-capture` (queries on those aren't seen then) |
+| `pgtrace_tls_processes` | `state` | with `-tls-capture`: processes with TLS probes `attached` / `unsupported` |
+| `pgtrace_tls_unresolved_total` | `result` | with `-tls-capture`: TLS events whose socket wasn't known yet, `resolved` / `dropped` |
 | `pgtrace_traced_processes` | | pgbouncer processes |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | | with `-bpf-stats` |
 | `pgtrace_truncations_total` | `layer` | kernel / parser / export: which size cap fired |
@@ -162,8 +166,8 @@ host pid namespace.
 | `pgtrace_client_*` | enabled client labels | opt-in (`-metrics-labels`): queries, errors, duration, pool wait per database/user/client IP |
 
 Plus the standard Go and process collectors. Every label is bounded; the
-series ceiling is 2,539 without client labels and 8,973 with the default
-label limit. See `docs/metrics.md` for every series and how to size the limit.
+series ceiling is 2,541 without client labels and 8,975 with the default
+label limit (2,557 / 8,991 with `-tls-capture`). See `docs/metrics.md` for every series and how to size the limit.
 
 ## Releases
 
@@ -218,7 +222,17 @@ make generate    # re-generate BPF objects after editing bpf/pgtrace.bpf.c (clan
   swapped (`pgtrace.correlation=inferred`). Durations stay correct.
 - Client connections opened before the agent started have no startup
   attributes (user, database, application_name).
-- No TLS on either side (payloads would be encrypted).
+- TLS is traced only with `-tls-capture`, for pgbouncer builds that call
+  OpenSSL 3's `SSL_read`/`SSL_write` from a dynamically linked `libssl`.
+  Without it, TLS connections are counted (`pgtrace_connections{tls="true"}`)
+  but their queries aren't seen. Version and cipher attributes are
+  best-effort (present when pgbouncer asks OpenSSL for them; pgbouncer 1.25
+  does so even with connection logging off). Sessions opened before the
+  agent started are picked up by a temporary fallback on `read`/`write`; the
+  first calls of such a session can be lost (counted in
+  `pgtrace_tls_unresolved_total`). The cost: 8 uprobe traps in pgbouncer per
+  TLS query, ≈ 9–11 µs of its CPU on the benchmark box; see
+  `docs/performance.md`.
 - Payload capture is capped per syscall (`-capture-bytes`) and per message
   (`-max-message-bytes`); longer SQL is truncated (`pgtrace.truncated=true`)
   but the parser stays in sync. `pgtrace_truncations_total` shows which cap fires.

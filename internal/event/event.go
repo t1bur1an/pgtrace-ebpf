@@ -30,6 +30,12 @@ type Data struct {
 	// direction are contiguous unless the capture skipped some.
 	Seq    uint32
 	HasSeq bool
+	// TLS: plaintext captured inside pgbouncer's TLS library (SSL_read /
+	// SSL_write), not at the socket. Such events have no stream offset.
+	TLS bool
+	// Session is the TLS session pointer when the socket isn't known yet
+	// (Key.FD == -1); zero otherwise.
+	Session uint64
 }
 
 // Connect is an outbound connect() on a socket.
@@ -51,4 +57,22 @@ type Accept struct {
 	TS   uint64
 	Key  ConnKey
 	Addr netip.AddrPort
+}
+
+// TLSFD maps a TLS session to its socket; emitted by the fallback that finds
+// the sockets of sessions opened before the agent started.
+type TLSFD struct {
+	TS      uint64
+	Key     ConnKey // Key.FD is the session's socket
+	Session uint64
+}
+
+// TLSAttr is the TLS version or cipher of a session, as pgbouncer asked
+// OpenSSL for it. Exactly one of Version and Cipher is set. Key.FD is -1 if
+// the session's socket isn't known.
+type TLSAttr struct {
+	TS              uint64
+	Key             ConnKey
+	Session         uint64
+	Version, Cipher string
 }

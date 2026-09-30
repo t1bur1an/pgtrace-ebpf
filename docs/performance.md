@@ -24,6 +24,7 @@ describe that mode.
 | Agent CPU / memory, 1,000 clients, ≈ 60–66 k client queries/s | **0.51 core, 99 MiB** at sample ratio 0.1; **0.68 core, 145 MiB** exporting every trace (120 k spans/s, all delivered). See [Export pipeline](#export-pipeline) |
 | Highest rate tested | 93 k queries/s through a single pgbouncer (pgbouncer + postgres + pgbench on one 8-core box were the limit, not the agent) |
 | Loss | **0 kernel ringbuf drops** in every run; every span the agent kept arrived in VictoriaTraces, including 120 k spans/s at 100 % sampling; any export loss is counted in `pgtrace_export_spans_total{stage="dropped"}` |
+| TLS capture (`-tls-capture`, opt-in) | **−40 % TPS** at 8 clients and −41 % at 64 against the same TLS setup without capture (worst case, ≈ 0.1 ms queries): pgbouncer spends +9.1 … +11.2 µs of CPU per TLS query on uprobe traps. Plain connections keep the costs above. See [TLS capture](#tls-capture) |
 | Agent userspace capacity | event loop (parse + correlate) is single-threaded: 0.43 core at 60 k client queries/s; span encoding runs on 4 export workers at ≈ 1.1 µs per two-span trace |
 
 For real workloads where queries take milliseconds rather than tens of
@@ -60,6 +61,61 @@ bottleneck. A 90-minute soak at 10 % (`docs/soak-results/export-20260929-1704/`)
 delivered 304,031 of 304,031 spans, with RSS flat at 141–143 MiB. That run was
 before the queue-slot and `GOGC` fixes, which roughly halved RSS in the
 benchmark above.
+
+## TLS capture
+
+`scripts/perf_tls.sh`: `pgbench -S -M simple`, 3 × 20 s alternated
+repetitions. TLS 1.3 on both hops, client certificates verified
+(`deploy/tls`, strict). Raw data: `docs/perf-results/tls/`.
+
+| clients | configuration | TPS | Δ | pgbouncer CPU per query | agent CPU |
+|---:|---|---:|---:|---:|---:|
+| 8 | no TLS | 107 391 | | 5.7 µs | |
+| 8 | no TLS + agent | 86 466 | −19.5 % vs no TLS | 7.8 µs | 0.54 core |
+| 8 | TLS | 71 849 | −33.1 % vs no TLS | 10.2 µs | |
+| 8 | TLS + agent, capture off | 72 200 | ±0 vs TLS | 10.2 µs | 0.00 core |
+| 8 | TLS + agent, **capture on** | 43 112 | **−40.0 % vs TLS** | 19.4 µs | 0.28 core |
+| 64 | no TLS | 89 982 | | 7.4 µs | |
+| 64 | no TLS + agent | 73 571 | −18.2 % vs no TLS | 9.7 µs | 0.48 core |
+| 64 | TLS | 60 414 | −32.9 % vs no TLS | 12.7 µs | |
+| 64 | TLS + agent, capture off | 60 318 | ±0 vs TLS | 12.8 µs | 0.00 core |
+| 64 | TLS + agent, **capture on** | 35 716 | **−40.9 % vs TLS** | 23.9 µs | 0.25 core |
+
+- With capture on, the agent saw every client query (e.g. 43 087 of 43 112
+  per second), with 0 kernel drops. With capture off, TLS connections cost
+  nothing and aren't seen; they are still counted in
+  `pgtrace_connections{tls="true"}`.
+- **Where it goes:** 8 uprobe traps per query in pgbouncer: on each hop one
+  `SSL_read` and one `SSL_write`, each probed at entry and return. Each trap
+  is a round trip into the kernel, about 1 µs, and pgbouncer pays it on its
+  single thread. The BPF
+  programs themselves took ≈ 2.5 µs per query in total across the host
+  (22 runs at 113 ns, with `-bpf-stats`). A throwaway prototype with a
+  minimal consumer and entry-only `SSL_write` measured +6.9 / +8.9 µs; the
+  agent adds ~2 µs more, which was not profiled further. (`SSL_write` must
+  be captured at return: with a slow reader pgbouncer calls it again with
+  the same bytes after a full socket. Entry capture duplicated them, and
+  the first TLS soak failed; `entry-capture/` keeps those results. The
+  return probe cost less than run-to-run noise.)
+- **Startup window:** after the agent starts, and again whenever a session
+  without a known socket appears, a fallback hooks every `read`/`write` on
+  the host. It stays attached until it has found no new session sockets for
+  30 s. Measured
+  with it attached (`entry-capture/results-fallback.csv`), the cost was
+  within noise of the steady state.
+- **Loss at high rates:** server connections that were already open when the
+  agent started, and stay idle until after the startup fallback has
+  detached, lose the events captured while the fallback re-attaches. In the
+  benchmark that was 6–416 events per run at 35–43 k queries/s, counted in
+  `pgtrace_tls_unresolved_total{result="dropped"}`. After that the sessions
+  are mapped and traced normally.
+- **Soak:** 30 minutes, strict TLS, big-JSON workload
+  (`docs/soak-results/tls-20260930-0432/`): 419 859 client queries, 0 orphans,
+  0 kernel drops, 3 016 of 3 016 truncated statements linked exactly, agent
+  RSS 57–68 MiB.
+- For queries that take milliseconds, the relative cost shrinks accordingly.
+  In absolute terms, at 10 k TLS queries/s capture costs pgbouncer about
+  0.09–0.11 of its one core.
 
 ## Client tracing and correlation
 
@@ -383,6 +439,10 @@ agent time. At 50 k queries/s it is about 0.05 + 0.15 cores.
   queue (`-export-queue`) fills and new kept traces are dropped. The drops are
   counted in `pgtrace_export_spans_total{stage="dropped"}`, and the event loop
   never blocks.
+- **TLS capture** adds ≈ 9–11 µs of pgbouncer CPU per TLS query on this box,
+  and pgbouncer is single-threaded: a pgbouncer that is already busy loses
+  throughput in proportion. It is opt-in (`-tls-capture`). See
+  [TLS capture](#tls-capture).
 - **Ringbuf.** 16 MiB. The reader is woken once 1 MiB is pending and otherwise
   drains every 20 ms, so a stalled agent has roughly 16 MiB / (≈ 200 bytes per
   event × 2 events per query) ≈ 40 k queries of headroom before the kernel
@@ -429,10 +489,13 @@ SKIP_MATRIX=1 SKIP_REPEATS=1 SKIP_NOSYNC=1 SKIP_BREAKDOWN=1 ./scripts/perf.sh   
 ./scripts/perf_1k.sh                              # 1,000 clients, one app and 10 apps (param-sync attach on/off)
 ./scripts/perf_sampling.sh                        # 1,000 clients, agent off / 10 % / 100 % sampling, export + VictoriaTraces
 ./scripts/soak.sh                                 # 90-minute soak with big JSON statements (DURATION=seconds)
+./scripts/perf_tls.sh                             # TLS capture cost: no TLS / TLS / TLS + agent with capture off and on
+./scripts/e2e_tls.sh                              # TLS correctness: strict, mixed TLS/plain, pre-existing sessions, restart
 ```
 
 `perf_1k.sh` writes to `docs/perf-results/1k/`, `perf_sampling.sh` to
-`docs/perf-results/sampling/` (override with `OUT=`), and `soak.sh` to
+`docs/perf-results/sampling/`, `perf_tls.sh` to `docs/perf-results/tls/`
+(override with `OUT=`), and `soak.sh` to
 `docs/soak-results/<date>/`.
 
 Files written to `docs/perf-results/`: `results.csv` (matrix and stress),
