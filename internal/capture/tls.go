@@ -26,17 +26,12 @@ const fallbackIdle = 30 * time.Second
 type tlsProcess interface{ Close() error }
 
 type tlsProc struct {
-	ex    *link.Executable
 	links []link.Link
-	ret   link.Link // SSL_write return probe, only while the fallback is on
 }
 
 func (p *tlsProc) Close() error {
 	for _, l := range p.links {
 		l.Close()
-	}
-	if p.ret != nil {
-		p.ret.Close()
 	}
 	return nil
 }
@@ -109,7 +104,7 @@ func (t *tlsCapture) attachProcess(pid uint32) (tlsProcess, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &tlsProc{ex: ex}
+	p := &tlsProc{}
 	opt := &link.UprobeOptions{PID: int(pid)}
 	o := &t.objs
 	for _, a := range []struct {
@@ -121,7 +116,7 @@ func (t *tlsCapture) attachProcess(pid uint32) (tlsProcess, error) {
 		{"SSL_read", o.SslReadEnter, false}, {"SSL_read", o.SslReadExit, true},
 		{"SSL_get_version", o.SslVerEnter, false}, {"SSL_get_version", o.SslVerExit, true},
 		{"SSL_CIPHER_get_name", o.SslCipherExit, true},
-		{"SSL_write", o.SslWrite, false},
+		{"SSL_write", o.SslWriteRet, true}, {"SSL_write", o.SslWrite, false},
 	} {
 		var l link.Link
 		if a.ret {
@@ -154,9 +149,6 @@ func (t *tlsCapture) sync(pids map[uint32]bool) {
 			continue
 		}
 		t.procs[pid] = p
-		if t.fbOn {
-			t.attachRet(pid, p)
-		}
 		slog.Info("tls probes attached", "pid", pid)
 	}
 	for pid, p := range t.procs {
@@ -178,19 +170,6 @@ func (t *tlsCapture) counts() (attached, unsupported int) {
 	return len(t.procs), len(t.unsupported)
 }
 
-func (t *tlsCapture) attachRet(pid uint32, p tlsProcess) {
-	tp, ok := p.(*tlsProc)
-	if !ok || tp.ret != nil {
-		return
-	}
-	l, err := tp.ex.Uretprobe("SSL_write", t.objs.SslWriteRet, &link.UprobeOptions{PID: int(pid)})
-	if err != nil {
-		slog.Warn("tls fallback: attach SSL_write return", "pid", pid, "err", err)
-		return
-	}
-	tp.ret = l
-}
-
 // need attaches the fallback, or keeps it attached.
 func (t *tlsCapture) need(now time.Time) {
 	t.mu.Lock()
@@ -198,17 +177,6 @@ func (t *tlsCapture) need(now time.Time) {
 	t.lastNeed = now
 	if t.fbOn {
 		return
-	}
-	// A call interrupted by an earlier detach may have left a stale entry.
-	var k uint64
-	var keys []uint64
-	it := t.objs.TlsCurrent.Iterate()
-	var v tlsCur
-	for it.Next(&k, &v) {
-		keys = append(keys, k)
-	}
-	for _, k := range keys {
-		_ = t.objs.TlsCurrent.Delete(k)
 	}
 	for _, prog := range []*ebpf.Program{t.objs.FallbackRead, t.objs.FallbackWrite} {
 		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
@@ -220,10 +188,6 @@ func (t *tlsCapture) need(now time.Time) {
 		}
 		t.fallback = append(t.fallback, l)
 	}
-	for pid, p := range t.procs {
-		t.attachRet(pid, p)
-	}
-	_ = t.objs.TlsFallback.Put(uint32(0), uint32(1))
 	t.fbOn = true
 	slog.Info("tls fallback attached")
 }
@@ -239,17 +203,10 @@ func (t *tlsCapture) expire(now time.Time) {
 }
 
 func (t *tlsCapture) detachLocked() {
-	_ = t.objs.TlsFallback.Put(uint32(0), uint32(0))
 	for _, l := range t.fallback {
 		l.Close()
 	}
 	t.fallback = nil
-	for _, p := range t.procs {
-		if tp, ok := p.(*tlsProc); ok && tp.ret != nil {
-			tp.ret.Close()
-			tp.ret = nil
-		}
-	}
 	t.fbOn = false
 }
 

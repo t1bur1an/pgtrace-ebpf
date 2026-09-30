@@ -60,7 +60,6 @@ const (
 	tlsMapScratch        = "scratch"
 	tlsMapTargetPids     = "target_pids"
 	tlsMapTlsCurrent     = "tls_current"
-	tlsMapTlsFallback    = "tls_fallback"
 	tlsMapTlsInfoSsl     = "tls_info_ssl"
 	tlsMapTlsSessions    = "tls_sessions"
 	tlsProgFallbackRead  = "fallback_read"
@@ -142,7 +141,6 @@ type tlsMapSpecs struct {
 	Scratch     *ebpf.MapSpec `ebpf:"scratch"`
 	TargetPids  *ebpf.MapSpec `ebpf:"target_pids"`
 	TlsCurrent  *ebpf.MapSpec `ebpf:"tls_current"`
-	TlsFallback *ebpf.MapSpec `ebpf:"tls_fallback"`
 	TlsInfoSsl  *ebpf.MapSpec `ebpf:"tls_info_ssl"`
 	TlsSessions *ebpf.MapSpec `ebpf:"tls_sessions"`
 }
@@ -180,7 +178,6 @@ type tlsMaps struct {
 	Scratch     *ebpf.Map `ebpf:"scratch"`
 	TargetPids  *ebpf.Map `ebpf:"target_pids"`
 	TlsCurrent  *ebpf.Map `ebpf:"tls_current"`
-	TlsFallback *ebpf.Map `ebpf:"tls_fallback"`
 	TlsInfoSsl  *ebpf.Map `ebpf:"tls_info_ssl"`
 	TlsSessions *ebpf.Map `ebpf:"tls_sessions"`
 }
@@ -193,7 +190,6 @@ func (m *tlsMaps) Close() error {
 		m.Scratch,
 		m.TargetPids,
 		m.TlsCurrent,
-		m.TlsFallback,
 		m.TlsInfoSsl,
 		m.TlsSessions,
 	)

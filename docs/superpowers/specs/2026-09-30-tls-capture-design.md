@@ -63,7 +63,7 @@ All of these are functions pgbouncer 1.25 imports:
 
 | probe | purpose | fires |
 |---|---|---|
-| `SSL_write` entry | plaintext sent (buffer, length) | every send |
+| `SSL_write` entry + return | plaintext sent: buffer at entry, bytes actually written at return | every send |
 | `SSL_read` entry | remember (session, buffer) for this thread | every receive |
 | `SSL_read` return | plaintext received (return value = length) | every receive |
 | `SSL_set_rfd` entry | session → socket fd | once per new session |
@@ -82,11 +82,16 @@ connection logging off), they're missing.
 
 - Map `tls_sessions`: key (tgid, session pointer) → fd. Filled by
   `SSL_set_rfd`, deleted by `SSL_free`, limited to 65,536 entries.
-- Map `tls_current`: key thread id → (session pointer, buffer).
-  - Filled at `SSL_read` entry and read and deleted at `SSL_read` return.
-  - While the fallback is attached, also filled at `SSL_write` entry and
-    deleted by the fallback's `SSL_write` return probe. That way a stale
-    entry can never map a later, unrelated `write`.
+- Map `tls_current`: key thread id → (session pointer, buffer). Filled at
+  `SSL_read`/`SSL_write` entry, then read and deleted at their return.
+
+> **Amended during implementation (2026-09-30):** `SSL_write` was first
+> captured at entry. The 30-minute TLS soak then found that with a slow
+> reader, `SSL_write` returns without writing (socket full) and pgbouncer
+> calls it again with the same bytes. Entry capture duplicated them and
+> misaligned the parser (44k orphans in 30 min). `SSL_write` is now
+> captured at return, and only the bytes it reports as written. That is one
+> more uprobe trap per `SSL_write`: 8 per query instead of 6.
 - Plaintext events use the existing event format: `kind` = data, `dir` =
   send/recv, `fd` from `tls_sessions`, and a new flag bit `flagTLS`.
   - They carry no TCP stream offset (`flagSeq` clear). For a session with no
@@ -104,19 +109,15 @@ connection logging off), they're missing.
 ### Fallback for sessions opened before the agent
 
 `SSL_set_rfd` only fires for new sessions. For older ones:
-- The agent attaches three programs:
-  - fentry on `ksys_read` and `ksys_write`, filtered in the kernel to traced
-    processes;
-  - a return probe on `SSL_write`, which clears `tls_current`.
-
-  It attaches them at startup, when TLS capture is on, and again whenever an
-  event arrives with `fd` = −1.
+- The agent attaches fentry programs on `ksys_read` and `ksys_write`,
+  filtered in the kernel to traced processes. It attaches them at startup,
+  when TLS capture is on, and again whenever an event arrives with
+  `fd` = −1.
 - When a traced thread is inside `SSL_read`/`SSL_write` (per `tls_current`)
   and its session has no fd, the fentry program stores the syscall's fd in
   `tls_sessions` and emits `K_TLS_FD`.
 - The agent detaches them after 30 s with no `fd` = −1 events. While
-  attached, they add a trampoline to every `read`/`write` on the host and a
-  second trap to each `SSL_write` of traced processes.
+  attached, they add a trampoline to every `read`/`write` on the host.
 - If `ksys_read`/`ksys_write` can't be attached (e.g. inlined in a kernel
   build), the fallback is unavailable. The agent logs it once, and
   pre-existing sessions stay untraced. Their events are counted as
@@ -133,9 +134,10 @@ connection logging off), they're missing.
   After `S` the frontend parser expects a startup message. With capture on,
   that startup message is the next plaintext event on the fd, so the parser
   continues without changes.
-- **Unresolved events** (`fd` = −1): these occur for `SSL_write` on a session
-  opened before the agent, because the plaintext is captured before the
-  ciphertext `write` reveals the fd.
+- **Unresolved events** (`fd` = −1) occur for sessions opened before the
+  agent while the fallback isn't attached yet. With `SSL_write` captured at
+  return, its ciphertext `write` has already mapped the fd whenever the
+  fallback is attached. The hold below is kept as a safety net.
   - The agent holds at most one such event per process.
   - If the next event from that process is the matching `K_TLS_FD`, the
     held event is fed right then, i.e. in its original position. pgbouncer

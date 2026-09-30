@@ -26,7 +26,8 @@ struct cur {
 	__u64 buf;
 };
 
-// Thread → the SSL_read/SSL_write call it is in.
+// Thread → the SSL_read/SSL_write call it is in. Cleared by the call's
+// return probe.
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
@@ -43,26 +44,11 @@ struct {
 	__type(value, __u64);
 } tls_info_ssl SEC(".maps");
 
-// [0] = 1 while the fallback programs are attached.
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-} tls_fallback SEC(".maps");
-
 static __always_inline __s32 session_fd(__u32 tgid, __u64 ssl)
 {
 	struct sess_key k = { .tgid = tgid, .ssl = ssl };
 	__s32 *fd = bpf_map_lookup_elem(&tls_sessions, &k);
 	return fd ? *fd : -1;
-}
-
-static __always_inline int fallback_on(void)
-{
-	__u32 zero = 0;
-	__u32 *on = bpf_map_lookup_elem(&tls_fallback, &zero);
-	return on && *on;
 }
 
 static __always_inline void put_session(struct event *e, __u64 ssl)
@@ -100,26 +86,30 @@ static __always_inline void emit_tls(__u64 id, __u64 ssl, const void *buf, int l
 		count_drop();
 }
 
+// SSL_write is captured on return: when the socket is full it returns
+// without having written (or writes only part), and pgbouncer calls it again
+// with the same bytes. Only what it reports as written is emitted.
 SEC("uprobe")
 int BPF_UPROBE(ssl_write, void *ssl, const void *buf, int num)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	if (!traced(id))
 		return 0;
-	if (fallback_on() && session_fd(id >> 32, (__u64)ssl) < 0) {
-		struct cur c = { .ssl = (__u64)ssl };
-		bpf_map_update_elem(&tls_current, &id, &c, BPF_ANY);
-	}
-	emit_tls(id, (__u64)ssl, buf, num, D_SEND);
+	struct cur c = { .ssl = (__u64)ssl, .buf = (__u64)buf };
+	bpf_map_update_elem(&tls_current, &id, &c, BPF_ANY);
 	return 0;
 }
 
-// Attached only with the fallback: ends the SSL_write call for the fallback.
 SEC("uretprobe")
-int BPF_URETPROBE(ssl_write_ret)
+int BPF_URETPROBE(ssl_write_ret, int ret)
 {
 	__u64 id = bpf_get_current_pid_tgid();
+	struct cur *p = bpf_map_lookup_elem(&tls_current, &id);
+	if (!p)
+		return 0;
+	struct cur c = *p;
 	bpf_map_delete_elem(&tls_current, &id);
+	emit_tls(id, c.ssl, (const void *)c.buf, ret, D_SEND);
 	return 0;
 }
 

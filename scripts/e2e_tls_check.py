@@ -78,6 +78,8 @@ if args.mode in ("strict", "nolog"):
     check("client and server connections counted as TLS", maxconn("client", "true") > 0 and maxconn("server", "true") > 0)
     check("no plain client connections counted", maxconn("client", "false") == 0)
     check("no socket-less TLS events dropped", dropped == 0, f"{dropped:.0f}")
+    resyncs = val(r'^pgtrace_parser_resyncs_total\{side="client"\}')
+    check("no client parser resyncs (incl. slow readers: retried SSL_write)", resyncs == 0, f"{resyncs:.0f}")
 elif args.mode == "mixed":
     for app, want_tls in (("tls-client", True), ("plain-client", False)):
         roots = app_roots(app)
@@ -102,8 +104,7 @@ elif args.mode == "preexisting":
     check("…and ≥ 99% linked exactly", linked >= 0.99 * roots, f"{linked}/{roots}")
     check("fallback attached during the run", prom("max_over_time(pgtrace_tls_fallback_attached[10m])") == 1)
     check("fallback detached after the load ended", val(r"^pgtrace_tls_fallback_attached") == 0)
-    check("socket-less SSL_write events resolved", resolved > 0, f"{resolved:.0f}")
-    print(f"INFO  socket-less events dropped: {dropped:.0f} (first calls of old sessions before the fallback attached)")
+    print(f"INFO  socket-less events: {resolved:.0f} resolved, {dropped:.0f} dropped (calls of old sessions before the fallback attached)")
 
 print("E2E TLS CHECK " + ("PASSED" if failures == 0 else f"FAILED ({failures})"))
 sys.exit(1 if failures else 0)

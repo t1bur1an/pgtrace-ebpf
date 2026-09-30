@@ -30,6 +30,11 @@ agent_up() {
 
 echo "== 1. strict TLS: the full e2e suite"
 PGBOUNCER_TLS_INI=pgbouncer.strict.ini SERIES_CEILING=8991 "$root/scripts/e2e.sh"
+echo "   slow readers: a full socket makes pgbouncer retry SSL_write with the same bytes"
+for _ in 1 2 3; do
+	lg sh -c "psql -Atc \"copy (select repeat(md5(i::text), 100) from generate_series(1,20000) i) to stdout\" | (sleep 4; wc -c)"
+done
+sleep 3
 check strict
 
 echo "== 2. mixed TLS and plain clients, plain server hop"
