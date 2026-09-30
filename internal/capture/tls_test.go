@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cilium/ebpf"
 )
 
 func TestLibsslPath(t *testing.T) {
@@ -74,5 +76,19 @@ func TestTLSSyncAttachesAndDetaches(t *testing.T) {
 	tc.sync(map[uint32]bool{1: true, 4: true, 5: true})
 	if calls != 1 {
 		t.Fatalf("attach called %d times for one unsupported pid", calls)
+	}
+}
+
+// Session state of a pgbouncer that exits without SSL_free (killed,
+// restarted) must not fill the maps for good: they evict the oldest entries.
+func TestTLSMapsEvictOldEntries(t *testing.T) {
+	spec, err := loadTls()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tls_sessions", "tls_current", "tls_info_ssl"} {
+		if typ := spec.Maps[name].Type; typ != ebpf.LRUHash {
+			t.Errorf("%s is %v, want LRUHash", name, typ)
+		}
 	}
 }

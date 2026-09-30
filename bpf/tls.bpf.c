@@ -13,9 +13,11 @@ struct sess_key {
 	__u64 ssl;
 };
 
-// TLS session → socket fd; from SSL_set_rfd, or from the fallback.
+// TLS session → socket fd; from SSL_set_rfd, or from the fallback. The
+// per-session and per-thread maps are LRU: entries of a pgbouncer that exits
+// without SSL_free (killed, restarted) are evicted when a map fills up.
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);
 	__type(key, struct sess_key);
 	__type(value, __s32);
@@ -29,7 +31,7 @@ struct cur {
 // Thread → the SSL_read/SSL_write call it is in. Cleared by the call's
 // return probe.
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 4096);
 	__type(key, __u64);
 	__type(value, struct cur);
@@ -38,7 +40,7 @@ struct {
 // Thread → session last passed to SSL_get_version (for the cipher name that
 // pgbouncer asks for right after).
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 1024);
 	__type(key, __u64);
 	__type(value, __u64);
