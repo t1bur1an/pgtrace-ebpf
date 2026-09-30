@@ -2,11 +2,13 @@ package capture
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -60,20 +62,20 @@ func TestTLSSyncAttachesAndDetaches(t *testing.T) {
 		}
 		return fakeProc{&closed}, nil
 	}
-	tc.sync(map[uint32]bool{1: true, 2: true, 3: true})
+	tc.sync(map[uint32]bool{1: true, 2: true, 3: true}, time.Unix(0, 0))
 	if a, u := tc.counts(); a != 2 || u != 1 {
 		t.Fatalf("attached %d unsupported %d", a, u)
 	}
 	// pgbouncer 2 restarted as 4; 3 exited.
-	tc.sync(map[uint32]bool{1: true, 4: true})
+	tc.sync(map[uint32]bool{1: true, 4: true}, time.Unix(0, 0))
 	if a, u := tc.counts(); a != 2 || u != 0 || closed != 1 {
 		t.Fatalf("attached %d unsupported %d closed %d", a, u, closed)
 	}
 	// An unsupported pid is not retried on every rescan.
 	calls := 0
 	tc.attach = func(uint32) (tlsProcess, error) { calls++; return nil, errors.New("x") }
-	tc.sync(map[uint32]bool{1: true, 4: true, 5: true})
-	tc.sync(map[uint32]bool{1: true, 4: true, 5: true})
+	tc.sync(map[uint32]bool{1: true, 4: true, 5: true}, time.Unix(0, 0))
+	tc.sync(map[uint32]bool{1: true, 4: true, 5: true}, time.Unix(0, 0))
 	if calls != 1 {
 		t.Fatalf("attach called %d times for one unsupported pid", calls)
 	}
@@ -89,6 +91,85 @@ func TestTLSMapsEvictOldEntries(t *testing.T) {
 	for _, name := range []string{"tls_sessions", "tls_current", "tls_info_ssl"} {
 		if typ := spec.Maps[name].Type; typ != ebpf.LRUHash {
 			t.Errorf("%s is %v, want LRUHash", name, typ)
+		}
+	}
+}
+
+func TestFallbackAttachFailureNotRetried(t *testing.T) {
+	calls := 0
+	tc := &tlsCapture{procs: map[uint32]tlsProcess{}, unsupported: map[uint32]bool{}}
+	tc.attachFallback = func() (func(), error) { calls++; return nil, errors.New("ksys_read not attachable") }
+	now := time.Unix(1000, 0)
+	for i := 0; i < 100; i++ {
+		tc.need(now.Add(time.Duration(i) * time.Millisecond))
+	}
+	if calls != 1 || tc.fallbackAttached() {
+		t.Fatalf("attach tried %d times, attached=%v", calls, tc.fallbackAttached())
+	}
+	// Retried only after a long back-off.
+	tc.need(now.Add(fallbackRetry + time.Second))
+	if calls != 2 {
+		t.Fatalf("attach tried %d times after the back-off", calls)
+	}
+}
+
+func TestFallbackAttachAndExpire(t *testing.T) {
+	calls, closed := 0, 0
+	tc := &tlsCapture{procs: map[uint32]tlsProcess{}, unsupported: map[uint32]bool{}}
+	tc.attachFallback = func() (func(), error) { calls++; return func() { closed++ }, nil }
+	now := time.Unix(1000, 0)
+	tc.need(now)
+	tc.need(now.Add(10 * time.Second))
+	tc.expire(now.Add(35 * time.Second)) // 25 s after the last need: stays
+	if calls != 1 || !tc.fallbackAttached() {
+		t.Fatalf("calls %d attached %v", calls, tc.fallbackAttached())
+	}
+	tc.expire(now.Add(41 * time.Second))
+	if tc.fallbackAttached() || closed != 1 {
+		t.Fatalf("attached %v closed %d", tc.fallbackAttached(), closed)
+	}
+}
+
+// A pgbouncer caught before ld.so mapped libssl (comm is set at exec) is
+// retried; only a lasting failure makes it unsupported.
+func TestTransientAttachFailureRetried(t *testing.T) {
+	closed, calls := 0, 0
+	tc := &tlsCapture{procs: map[uint32]tlsProcess{}, unsupported: map[uint32]bool{}}
+	tc.attach = func(uint32) (tlsProcess, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("%w: no libssl mapped", errTransient)
+		}
+		return fakeProc{&closed}, nil
+	}
+	now := time.Unix(1000, 0)
+	tc.sync(map[uint32]bool{7: true}, now)
+	if a, u := tc.counts(); a != 0 || u != 0 {
+		t.Fatalf("after a transient failure: attached %d unsupported %d", a, u)
+	}
+	tc.sync(map[uint32]bool{7: true}, now.Add(5*time.Second))
+	if a, u := tc.counts(); a != 1 || u != 0 {
+		t.Fatalf("after the retry: attached %d unsupported %d", a, u)
+	}
+	// A failure that keeps being transient gives up after transientRetry.
+	tc.attach = func(uint32) (tlsProcess, error) { return nil, fmt.Errorf("%w: no libssl mapped", errTransient) }
+	tc.sync(map[uint32]bool{7: true, 8: true}, now)
+	tc.sync(map[uint32]bool{7: true, 8: true}, now.Add(transientRetry+time.Second))
+	if a, u := tc.counts(); a != 1 || u != 1 {
+		t.Fatalf("attached %d unsupported %d", a, u)
+	}
+}
+
+// A return probe attached after its entry probe could miss the return of a
+// call already in progress, leaving a stale per-thread entry.
+func TestReturnProbesAttachedBeforeEntries(t *testing.T) {
+	seenEntry := map[string]bool{}
+	for _, p := range tlsProbes(&tlsObjects{}) {
+		if p.ret && seenEntry[p.sym] {
+			t.Errorf("%s: return probe attached after its entry probe", p.sym)
+		}
+		if !p.ret {
+			seenEntry[p.sym] = true
 		}
 	}
 }

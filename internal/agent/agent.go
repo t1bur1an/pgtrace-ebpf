@@ -37,6 +37,18 @@ type Stats struct {
 	ServerTLS, ClientTLS uint64 // …of which use TLS
 }
 
+// ServerPlain and ClientPlain are the connections without TLS. The counters
+// are read without a lock, so a TLS count may briefly exceed its total.
+func (s Stats) ServerPlain() uint64 { return plain(s.Server, s.ServerTLS) }
+func (s Stats) ClientPlain() uint64 { return plain(s.Client, s.ClientTLS) }
+
+func plain(total, tls uint64) uint64 {
+	if tls > total {
+		return 0
+	}
+	return total - tls
+}
+
 // Filter lets the agent tell the kernel which fds need no payload capture.
 type Filter interface {
 	Ignore(event.ConnKey) // neither client nor server: stop capturing
@@ -175,12 +187,14 @@ func (a *Agent) handle(ev any) {
 	switch ev := ev.(type) {
 	case event.Connect:
 		a.event("connect")
+		delete(a.tlsPending, ev.Key) // a new socket on this fd number
 		a.drop(ev.Key)
 		a.cm.OnConnect(ev.Key, ev.Addr)
 		a.opened[ev.Key] = ev.TS
 		a.classified(ev.Key)
 	case event.Accept:
 		a.event("accept")
+		delete(a.tlsPending, ev.Key)
 		a.drop(ev.Key)
 		a.cm.OnAccept(ev.Key, ev.Addr)
 		a.opened[ev.Key] = ev.TS
@@ -205,7 +219,12 @@ func (a *Agent) handle(ev any) {
 		}
 		a.data(ev)
 	case event.TLSFD:
-		a.events.Add(1) // only matters to a held event; settle handled it
+		a.events.Add(1) // a held event was settled above
+		// The fallback found a pre-existing session's socket; more of them
+		// may be waiting, so keep it attached.
+		if a.Fallback != nil {
+			a.Fallback.TLSNeedFallback()
+		}
 	case event.TLSAttr:
 		a.events.Add(1)
 		a.tlsAttr(ev)

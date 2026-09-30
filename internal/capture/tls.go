@@ -22,6 +22,17 @@ import (
 // the last TLS event without a socket.
 const fallbackIdle = 30 * time.Second
 
+// fallbackRetry is how long a failed fallback attach is not retried.
+const fallbackRetry = 10 * time.Minute
+
+// transientRetry is how long a process whose attach failed transiently (e.g.
+// libssl not mapped yet right after exec) is retried before it counts as
+// unsupported.
+const transientRetry = 30 * time.Second
+
+// errTransient marks attach failures worth retrying.
+var errTransient = errors.New("transient")
+
 // tlsProcess is the probes attached to one pgbouncer process.
 type tlsProcess interface{ Close() error }
 
@@ -42,13 +53,18 @@ type tlsCapture struct {
 	objs     tlsObjects
 	procRoot string
 	attach   func(pid uint32) (tlsProcess, error)
+	// attachFallback attaches the socket-finding programs and returns their
+	// detach function.
+	attachFallback func() (detach func(), err error)
 
 	mu          sync.Mutex
 	procs       map[uint32]tlsProcess
 	unsupported map[uint32]bool
-	fallback    []link.Link // fentry ksys_read/ksys_write
+	failing     map[uint32]time.Time // pid → first transient attach failure
+	detachFB    func()               // detaches the fallback while it is attached
 	fbOn        bool
 	lastNeed    time.Time
+	retryAfter  time.Time // a failed fallback attach isn't retried before this
 }
 
 func newTLSCapture(c *Capture, procRoot string, captureBytes int) (*tlsCapture, error) {
@@ -72,6 +88,7 @@ func newTLSCapture(c *Capture, procRoot string, captureBytes int) (*tlsCapture, 
 		return nil, fmt.Errorf("load tls bpf: %w", err)
 	}
 	t.attach = t.attachProcess
+	t.attachFallback = t.attachFallbackPrograms
 	return t, nil
 }
 
@@ -81,24 +98,42 @@ func (t *tlsCapture) programs() []*ebpf.Program {
 		o.SslVerEnter, o.SslVerExit, o.SslCipherExit, o.FallbackRead, o.FallbackWrite}
 }
 
+type tlsProbe struct {
+	sym  string
+	prog *ebpf.Program
+	ret  bool
+}
+
+// tlsProbes lists the libssl probes in attach order: each return probe
+// before its entry probe, so no call in progress leaves a stale entry.
+func tlsProbes(o *tlsObjects) []tlsProbe {
+	return []tlsProbe{
+		{"SSL_set_rfd", o.SslSetRfd, false}, {"SSL_free", o.SslFree, false},
+		{"SSL_read", o.SslReadExit, true}, {"SSL_read", o.SslReadEnter, false},
+		{"SSL_get_version", o.SslVerExit, true}, {"SSL_get_version", o.SslVerEnter, false},
+		{"SSL_CIPHER_get_name", o.SslCipherExit, true},
+		{"SSL_write", o.SslWriteRet, true}, {"SSL_write", o.SslWrite, false},
+	}
+}
+
 // attachProcess attaches the probes to one pgbouncer process's libssl.
 func (t *tlsCapture) attachProcess(pid uint32) (tlsProcess, error) {
 	dir := filepath.Join(t.procRoot, strconv.FormatUint(uint64(pid), 10))
 	ok, err := importsAll(filepath.Join(dir, "exe"), "SSL_read", "SSL_write")
 	if err != nil {
-		return nil, fmt.Errorf("read executable: %w", err)
+		return nil, fmt.Errorf("%w: read executable: %v", errTransient, err)
 	}
 	if !ok {
 		return nil, errors.New("unsupported TLS API (pgbouncer doesn't import SSL_read/SSL_write)")
 	}
 	f, err := os.Open(filepath.Join(dir, "maps"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errTransient, err)
 	}
 	lib, found := libsslPath(f)
 	f.Close()
 	if !found {
-		return nil, errors.New("no libssl mapped")
+		return nil, fmt.Errorf("%w: no libssl mapped", errTransient)
 	}
 	ex, err := link.OpenExecutable(filepath.Join(dir, "root", lib))
 	if err != nil {
@@ -107,17 +142,7 @@ func (t *tlsCapture) attachProcess(pid uint32) (tlsProcess, error) {
 	p := &tlsProc{}
 	opt := &link.UprobeOptions{PID: int(pid)}
 	o := &t.objs
-	for _, a := range []struct {
-		sym  string
-		prog *ebpf.Program
-		ret  bool
-	}{
-		{"SSL_set_rfd", o.SslSetRfd, false}, {"SSL_free", o.SslFree, false},
-		{"SSL_read", o.SslReadEnter, false}, {"SSL_read", o.SslReadExit, true},
-		{"SSL_get_version", o.SslVerEnter, false}, {"SSL_get_version", o.SslVerExit, true},
-		{"SSL_CIPHER_get_name", o.SslCipherExit, true},
-		{"SSL_write", o.SslWriteRet, true}, {"SSL_write", o.SslWrite, false},
-	} {
+	for _, a := range tlsProbes(o) {
 		var l link.Link
 		if a.ret {
 			l, err = ex.Uretprobe(a.sym, a.prog, opt)
@@ -133,23 +158,41 @@ func (t *tlsCapture) attachProcess(pid uint32) (tlsProcess, error) {
 	return p, nil
 }
 
-// sync attaches to new pids and detaches from gone ones. Unsupported pids
-// are remembered and not retried.
-func (t *tlsCapture) sync(pids map[uint32]bool) {
+// sync attaches to new pids and detaches from gone ones. A transient
+// failure is retried for transientRetry; unsupported pids are remembered and
+// not retried.
+func (t *tlsCapture) sync(pids map[uint32]bool, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.failing == nil {
+		t.failing = map[uint32]time.Time{}
+	}
 	for pid := range pids {
 		if t.procs[pid] != nil || t.unsupported[pid] {
 			continue
 		}
 		p, err := t.attach(pid)
 		if err != nil {
+			first, seen := t.failing[pid]
+			if !seen {
+				first, t.failing[pid] = now, now
+			}
+			if errors.Is(err, errTransient) && now.Sub(first) < transientRetry {
+				continue // e.g. libssl not mapped yet: retried on the next rescan
+			}
 			slog.Warn("tls capture unavailable for process", "pid", pid, "err", err)
 			t.unsupported[pid] = true
+			delete(t.failing, pid)
 			continue
 		}
+		delete(t.failing, pid)
 		t.procs[pid] = p
 		slog.Info("tls probes attached", "pid", pid)
+	}
+	for pid := range t.failing {
+		if !pids[pid] {
+			delete(t.failing, pid)
+		}
 	}
 	for pid, p := range t.procs {
 		if !pids[pid] {
@@ -170,26 +213,44 @@ func (t *tlsCapture) counts() (attached, unsupported int) {
 	return len(t.procs), len(t.unsupported)
 }
 
-// need attaches the fallback, or keeps it attached.
+// need attaches the fallback, or keeps it attached. If attaching failed, it
+// isn't retried (or logged again) for fallbackRetry.
 func (t *tlsCapture) need(now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.lastNeed = now
 	if t.fbOn {
+		t.lastNeed = now
 		return
+	}
+	if now.Before(t.retryAfter) {
+		return
+	}
+	detach, err := t.attachFallback()
+	if err != nil {
+		slog.Warn("tls fallback unavailable: sessions opened before the agent stay untraced", "err", err, "retry_in", fallbackRetry)
+		t.retryAfter = now.Add(fallbackRetry)
+		return
+	}
+	t.detachFB, t.fbOn, t.lastNeed = detach, true, now
+	slog.Info("tls fallback attached")
+}
+
+func (t *tlsCapture) attachFallbackPrograms() (func(), error) {
+	var links []link.Link
+	detach := func() {
+		for _, l := range links {
+			l.Close()
+		}
 	}
 	for _, prog := range []*ebpf.Program{t.objs.FallbackRead, t.objs.FallbackWrite} {
 		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
 		if err != nil {
-			slog.Warn("tls fallback unavailable: sessions opened before the agent stay untraced", "err", err)
-			t.detachLocked()
-			t.lastNeed = now.Add(24 * time.Hour) // don't retry on every event
-			return
+			detach()
+			return nil, err
 		}
-		t.fallback = append(t.fallback, l)
+		links = append(links, l)
 	}
-	t.fbOn = true
-	slog.Info("tls fallback attached")
+	return detach, nil
 }
 
 // expire detaches the fallback after fallbackIdle without a need.
@@ -203,11 +264,10 @@ func (t *tlsCapture) expire(now time.Time) {
 }
 
 func (t *tlsCapture) detachLocked() {
-	for _, l := range t.fallback {
-		l.Close()
+	if t.detachFB != nil {
+		t.detachFB()
 	}
-	t.fallback = nil
-	t.fbOn = false
+	t.detachFB, t.fbOn = nil, false
 }
 
 func (t *tlsCapture) fallbackAttached() bool {

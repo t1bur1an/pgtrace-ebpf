@@ -185,3 +185,38 @@ func TestTLSAttrBeforeFirstData(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A lost Close must not let a new plain connection on the fd number inherit
+// version/cipher (and TLS) that arrived for the old one.
+func TestTLSPendingClearedOnAcceptAndConnect(t *testing.T) {
+	_, a, _ := runTLS(t, nil,
+		event.TLSAttr{Key: client, Version: "TLSv1.3"}, // for a connection never seen
+		event.Accept{Key: client, Addr: peer},          // its Close was lost
+		data(client, event.DirRecv, 1, q),
+		event.TLSAttr{Key: server, Cipher: "TLS_AES_128_GCM_SHA256"},
+		event.Connect{Key: server, Addr: netip.MustParseAddrPort("10.0.0.2:5432")},
+		data(server, event.DirSend, 2, q),
+	)
+	if a.TLSInfo(client).On || a.TLSInfo(server).On {
+		t.Fatalf("plain connections inherited TLS: client %+v server %+v", a.TLSInfo(client), a.TLSInfo(server))
+	}
+}
+
+// Each socket the fallback finds means more pre-existing sessions may be
+// waiting: the fallback stays attached while it keeps finding them.
+func TestTLSFDKeepsFallback(t *testing.T) {
+	fb := &fakeFallback{}
+	runTLS(t, fb, event.TLSFD{Key: client, Session: 1}, event.TLSFD{Key: server, Session: 2})
+	if fb.n != 2 {
+		t.Fatalf("fallback told %d times", fb.n)
+	}
+}
+
+// Stats counters are read without a lock while connections come and go, so
+// a TLS count may briefly exceed its total.
+func TestStatsPlainNeverNegative(t *testing.T) {
+	st := Stats{Server: 3, ServerTLS: 4, Client: 5, ClientTLS: 2}
+	if st.ServerPlain() != 0 || st.ClientPlain() != 3 {
+		t.Fatalf("server %d client %d", st.ServerPlain(), st.ClientPlain())
+	}
+}

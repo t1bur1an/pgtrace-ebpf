@@ -97,9 +97,10 @@ repetitions. TLS 1.3 on both hops, client certificates verified
   the same bytes after a full socket. Entry capture duplicated them, and
   the first TLS soak failed; `entry-capture/` keeps those results. The
   return probe cost less than run-to-run noise.)
-- **Startup window:** for 30 s after the agent starts, and again whenever a
-  session without a known socket appears, a fallback hooks every
-  `read`/`write` on the host and adds a second trap to `SSL_write`. Measured
+- **Startup window:** after the agent starts, and again whenever a session
+  without a known socket appears, a fallback hooks every `read`/`write` on
+  the host. It stays attached until it has found no new session sockets for
+  30 s. Measured
   with it attached (`entry-capture/results-fallback.csv`), the cost was
   within noise of the steady state.
 - **Loss at high rates:** server connections that were already open when the

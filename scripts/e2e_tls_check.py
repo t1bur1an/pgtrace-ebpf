@@ -102,7 +102,7 @@ elif args.mode == "preexisting":
     check("queries of sessions opened before the agent are traced", roots > 1000, f"{roots}")
     check("…and marked TLS", tls_roots == roots, f"{tls_roots}/{roots}")
     check("…and ≥ 99% linked exactly", linked >= 0.99 * roots, f"{linked}/{roots}")
-    check("fallback attached during the run", prom("max_over_time(pgtrace_tls_fallback_attached[10m])") == 1)
+    check("fallback attached at startup", prom("max_over_time(pgtrace_tls_fallback_attached[10m])") == 1)
     check("fallback detached after the load ended", val(r"^pgtrace_tls_fallback_attached") == 0)
     print(f"INFO  socket-less events: {resolved:.0f} resolved, {dropped:.0f} dropped (calls of old sessions before the fallback attached)")
 

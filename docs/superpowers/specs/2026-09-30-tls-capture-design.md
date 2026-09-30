@@ -116,12 +116,14 @@ connection logging off), they're missing.
 - When a traced thread is inside `SSL_read`/`SSL_write` (per `tls_current`)
   and its session has no fd, the fentry program stores the syscall's fd in
   `tls_sessions` and emits `K_TLS_FD`.
-- The agent detaches them after 30 s with no `fd` = −1 events. While
-  attached, they add a trampoline to every `read`/`write` on the host.
+- The agent detaches them after 30 s with neither an `fd` = −1 event nor a
+  `K_TLS_FD`: each session the fallback finds suggests more are waiting.
+  While attached, they add a trampoline to every `read`/`write` on the
+  host.
 - If `ksys_read`/`ksys_write` can't be attached (e.g. inlined in a kernel
-  build), the fallback is unavailable. The agent logs it once, and
-  pre-existing sessions stay untraced. Their events are counted as
-  unresolved drops.
+  build), the fallback is unavailable. The agent logs it and retries at
+  most every 10 minutes. Meanwhile pre-existing sessions stay untraced, and
+  their events are counted as unresolved drops.
 
 ## 2. Inside the agent
 
@@ -171,6 +173,7 @@ connection logging off), they're missing.
 
 | situation | behaviour | visible as |
 |---|---|---|
+| no libssl mapped yet (just after exec), or /proc unreadable | retried at each rescan for 30 s, then as below | – |
 | no libssl, missing symbols | warn, trace plain connections | `pgtrace_tls_processes{state="unsupported"}` |
 | pgbouncer doesn't import `SSL_read`/`SSL_write` | warn, attach nothing | same |
 | probe run skipped by the kernel | parser length checks | `pgtrace_bpf_recursion_misses_total{program}` |
@@ -231,9 +234,9 @@ registered when it's on:
   - queries from those sessions are traced after the agent starts;
   - `pgtrace_tls_fallback_attached` goes 1 → 0 within 30 s after the load
     ends;
-  - resolved > 0;
-  - dropped stays small (only the first call of each old session can be
-    lost, if it happens before the fallback attaches) and is reported.
+  - resolved and dropped are reported. With `SSL_write` captured at return,
+    a session is mapped before its data is emitted whenever the fallback is
+    attached, so both are expected to be about 0.
 - **Connection logging off** (`log_connections=0`, `log_disconnections=0`):
   record whether version/cipher still appear. Either result is acceptable
   and gets documented.

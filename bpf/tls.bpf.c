@@ -182,6 +182,10 @@ static __always_inline void emit_info(__u64 id, const char *text, __u8 which)
 	if (!ssl || !text)
 		return;
 	__u64 s = *ssl;
+	// The cipher is asked for right after the version: forget the session
+	// then, so a later unrelated SSL_CIPHER_get_name isn't attributed to it.
+	if (which == 1)
+		bpf_map_delete_elem(&tls_info_ssl, &id);
 	struct event *e = new_event(id, session_fd(id >> 32, s), K_TLS_INFO);
 	if (!e)
 		return;

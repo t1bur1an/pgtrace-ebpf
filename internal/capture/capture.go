@@ -229,7 +229,7 @@ func (c *Capture) rescan(cfg Config) {
 	}
 	c.pids = found
 	if c.tls != nil {
-		c.tls.sync(found)
+		c.tls.sync(found, time.Now())
 		c.tls.expire(time.Now())
 	}
 }

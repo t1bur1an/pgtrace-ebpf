@@ -256,9 +256,9 @@ func run(c config) error {
 				met.SetTracedProcesses(len(capt.Pids()))
 				met.Evict()
 				met.SetConnections("server", true, int(st.ServerTLS))
-				met.SetConnections("server", false, int(st.Server-st.ServerTLS))
+				met.SetConnections("server", false, int(st.ServerPlain()))
 				met.SetConnections("client", true, int(st.ClientTLS))
-				met.SetConnections("client", false, int(st.Client-st.ClientTLS))
+				met.SetConnections("client", false, int(st.ClientPlain()))
 				bpfTime, bpfRuns := capt.ProgStats()
 				slog.Info("stats", "events", st.Events, "queries", st.Queries,
 					"server_conns", st.Server, "client_conns", st.Client, "server_tls", st.ServerTLS, "client_tls", st.ClientTLS, "traces", ss["seen"],
