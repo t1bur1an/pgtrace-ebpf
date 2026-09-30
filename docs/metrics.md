@@ -27,7 +27,7 @@ addresses (`internal/metrics/cardinality_test.go`).
 | `pgtrace_events_total` | counter | `kind` = data, connect, accept, close | 4 |
 | `pgtrace_truncations_total` | counter | `layer` = kernel, parser, export | 3 |
 | `pgtrace_trace_context_total` | counter | `result` = linked, not_per_execution, invalid (SQLCommenter) | 3 |
-| `pgtrace_connections` | gauge | `side` = client, server | 2 |
+| `pgtrace_connections` | gauge | `side` = client, server · `tls` = true, false | 4 |
 | `pgtrace_correlator_entries` | gauge | `kind` = queued, held, inflight, unattributed, paramsync | 5 |
 | `pgtrace_parser_resyncs_total` | counter | `side` = client, server: a parser lost its place and resynchronised | 2 |
 | `pgtrace_export_spans_total` | counter | `stage` = created (encoded), exported (delivered), dropped (export queue full; spans the trace would have had), failed_batches (counts batches, not spans). created − exported = spans in unsent or failed batches | 4 |
@@ -37,7 +37,7 @@ addresses (`internal/metrics/cardinality_test.go`).
 | `pgtrace_kernel_drops_total` | counter | – | 1 |
 | `pgtrace_bpf_run_seconds_total`, `pgtrace_bpf_runs_total` | counter | – (only with `-bpf-stats`) | 2 |
 | `pgtrace_bpf_recursion_misses_total` | counter | `program`: runs the kernel skipped because another run was active on the CPU | 5 |
-| **base ceiling** | | | **2 539** |
+| **base ceiling** | | | **2 541** |
 
 The `operation` keywords are SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT,
 END, ROLLBACK, SET, SHOW, WITH, COPY, CREATE, ALTER, DROP, TRUNCATE, VACUUM,
@@ -54,6 +54,18 @@ A histogram series count is its 12 buckets + `+Inf` + `_sum` + `_count` = 15.
 
 The Go and process collectors (`go_*`, `process_*`) add about 45 series
 (44 in the scrape below).
+
+## With -tls-capture
+
+| metric | type | labels | series |
+|---|---|---|---:|
+| `pgtrace_tls_processes` | gauge | `state` = attached, unsupported | 2 |
+| `pgtrace_tls_fallback_attached` | gauge | – : 1 while the socket-finding fallback for pre-existing sessions is attached | 1 |
+| `pgtrace_tls_unresolved_total` | counter | `result` = resolved, dropped: TLS events captured before their socket was known | 2 |
+| `pgtrace_bpf_recursion_misses_total` | counter | 11 more `program` values (the TLS probes and the fallback) | 11 |
+
+That adds 16 series: the ceiling is 2 557 without client labels and 8 991
+with the default label limit.
 
 ## Opt-in per-client metrics
 
@@ -88,10 +100,10 @@ combination that comes back starts its counters from zero, which Prometheus
 
 | `-metrics-label-limit` | max pgtrace series |
 |---:|---:|
-| labels off | 2 539 |
-| 50 | 4 173 |
-| 200 (default) | 8 973 |
-| 1 000 | 34 573 |
+| labels off | 2 541 |
+| 50 | 4 175 |
+| 200 (default) | 8 975 |
+| 1 000 | 34 575 |
 
 Choose the limit from your Prometheus budget. If
 `pgtrace_metrics_label_overflow_total` keeps rising, there are more active

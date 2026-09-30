@@ -1,0 +1,101 @@
+ Container pgtrace-loadgen-run-5ffc677f0d64 Creating 
+ Container pgtrace-loadgen-run-5ffc677f0d64 Created 
+pgbench (17.11 (Debian 17.11-1.pgdg13+2))
+progress: 60.0 s, 150.5 tps, lat 9.460 ms stddev 17.637, 0 failed, lag 0.207 ms, 0 retried, 0 retries
+progress: 120.0 s, 149.6 tps, lat 13.966 ms stddev 27.366, 0 failed, lag 0.809 ms, 0 retried, 0 retries
+progress: 180.0 s, 147.2 tps, lat 17.697 ms stddev 35.477, 0 failed, lag 1.125 ms, 1 retried, 1 retries
+progress: 240.0 s, 148.9 tps, lat 18.044 ms stddev 110.518, 0 failed, lag 0.635 ms, 3 retried, 3 retries
+progress: 300.0 s, 149.9 tps, lat 13.007 ms stddev 22.209, 0 failed, lag 0.155 ms, 0 retried, 0 retries
+progress: 360.0 s, 149.4 tps, lat 18.210 ms stddev 38.404, 0 failed, lag 1.568 ms, 1 retried, 1 retries
+progress: 420.0 s, 150.2 tps, lat 15.219 ms stddev 76.250, 0 failed, lag 0.319 ms, 1 retried, 1 retries
+progress: 480.0 s, 148.5 tps, lat 16.700 ms stddev 74.283, 0 failed, lag 0.367 ms, 0 retried, 0 retries
+progress: 540.0 s, 149.8 tps, lat 18.609 ms stddev 75.412, 0 failed, lag 1.431 ms, 1 retried, 2 retries
+progress: 600.0 s, 151.5 tps, lat 20.072 ms stddev 101.201, 0 failed, lag 0.761 ms, 0 retried, 0 retries
+progress: 660.0 s, 151.6 tps, lat 17.107 ms stddev 50.968, 0 failed, lag 1.015 ms, 0 retried, 0 retries
+progress: 720.0 s, 147.2 tps, lat 16.585 ms stddev 30.324, 0 failed, lag 0.640 ms, 0 retried, 0 retries
+progress: 780.0 s, 150.5 tps, lat 17.500 ms stddev 37.160, 0 failed, lag 0.990 ms, 0 retried, 0 retries
+progress: 840.0 s, 149.3 tps, lat 18.369 ms stddev 43.035, 0 failed, lag 0.936 ms, 0 retried, 0 retries
+progress: 900.0 s, 148.6 tps, lat 16.922 ms stddev 77.861, 0 failed, lag 0.321 ms, 1 retried, 2 retries
+progress: 960.0 s, 149.7 tps, lat 18.596 ms stddev 41.131, 0 failed, lag 1.314 ms, 1 retried, 1 retries
+progress: 1020.0 s, 150.2 tps, lat 17.656 ms stddev 36.262, 0 failed, lag 1.026 ms, 0 retried, 0 retries
+progress: 1080.0 s, 151.1 tps, lat 16.601 ms stddev 42.447, 0 failed, lag 0.762 ms, 1 retried, 1 retries
+progress: 1140.0 s, 148.6 tps, lat 18.194 ms stddev 43.897, 0 failed, lag 1.202 ms, 0 retried, 0 retries
+progress: 1200.0 s, 150.4 tps, lat 15.203 ms stddev 29.259, 0 failed, lag 0.439 ms, 0 retried, 0 retries
+progress: 1260.0 s, 151.6 tps, lat 15.665 ms stddev 58.012, 0 failed, lag 0.218 ms, 0 retried, 0 retries
+progress: 1320.0 s, 148.5 tps, lat 17.650 ms stddev 49.777, 0 failed, lag 0.733 ms, 0 retried, 0 retries
+progress: 1380.0 s, 148.9 tps, lat 17.933 ms stddev 43.160, 0 failed, lag 0.837 ms, 0 retried, 0 retries
+progress: 1440.0 s, 152.9 tps, lat 17.643 ms stddev 65.856, 0 failed, lag 0.877 ms, 4 retried, 4 retries
+progress: 1500.0 s, 148.1 tps, lat 16.692 ms stddev 44.887, 0 failed, lag 0.322 ms, 3 retried, 3 retries
+progress: 1560.0 s, 148.8 tps, lat 18.179 ms stddev 33.720, 0 failed, lag 1.287 ms, 0 retried, 0 retries
+progress: 1620.0 s, 149.4 tps, lat 22.161 ms stddev 155.825, 0 failed, lag 1.594 ms, 3 retried, 4 retries
+progress: 1680.0 s, 149.3 tps, lat 24.975 ms stddev 124.558, 0 failed, lag 2.347 ms, 4 retried, 4 retries
+progress: 1740.0 s, 150.3 tps, lat 18.947 ms stddev 104.316, 0 failed, lag 0.518 ms, 6 retried, 6 retries
+progress: 1800.0 s, 146.7 tps, lat 16.980 ms stddev 28.220, 0 failed, lag 0.821 ms, 0 retried, 0 retries
+transaction type: multiple scripts
+scaling factor: 1
+query mode: prepared
+number of clients: 16
+number of threads: 4
+maximum number of tries: 20
+duration: 1800 s
+number of transactions actually processed: 269248
+number of failed transactions: 0 (0.000%)
+number of serialization failures: 0 (0.000%)
+number of deadlock failures: 0 (0.000%)
+number of transactions retried: 30 (0.011%)
+total number of retries: 33
+latency average = 17.370 ms
+latency stddev = 66.560 ms
+rate limit schedule lag: avg 0.852 (max 270.470) ms
+initial connection time = 26.877 ms
+tps = 149.483583 (without initial connection time)
+SQL script 1: /soak/gen/ext_insert.sql
+ - weight: 25 (targets 25.0% of total)
+ - 67022 transactions (24.9% of total, tps = 37.209891)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 17.118 ms
+ - latency stddev = 46.010 ms
+SQL script 2: /soak/gen/ext_update.sql
+ - weight: 20 (targets 20.0% of total)
+ - 54037 transactions (20.1% of total, tps = 30.000759)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 26 (0.048%)
+ - total number of retries: 28
+ - latency average = 24.489 ms
+ - latency stddev = 130.656 ms
+SQL script 3: /soak/gen/ext_select.sql
+ - weight: 30 (targets 30.0% of total)
+ - 80894 transactions (30.0% of total, tps = 44.911475)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 23.638 ms
+ - latency stddev = 28.064 ms
+SQL script 4: /soak/gen/ext_jsonpath.sql
+ - weight: 15 (targets 15.0% of total)
+ - 40433 transactions (15.0% of total, tps = 22.447965)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 0 (0.000%)
+ - total number of retries: 0
+ - latency average = 5.189 ms
+ - latency stddev = 10.903 ms
+SQL script 5: /soak/gen/ext_delete.sql
+ - weight: 10 (targets 10.0% of total)
+ - 26862 transactions (10.0% of total, tps = 14.913492)
+ - number of failed transactions: 0 (0.000%)
+ - number of serialization failures: 0 (0.000%)
+ - number of deadlock failures: 0 (0.000%)
+ - number of transactions retried: 4 (0.015%)
+ - total number of retries: 5
+ - latency average = 3.141 ms
+ - latency stddev = 39.830 ms
