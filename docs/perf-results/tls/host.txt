@@ -1,0 +1,5 @@
+date: 2026-09-30T03:14:05+03:00
+cpu: AMD Ryzen 7 7700X 8-Core Processor (16 threads)
+kernel: 7.2.7-arch1-1
+pgbench -S -M simple, 20s x 3, clients: 8 64
+tls: TLSv1.3 both hops, client certificates verified (deploy/tls, strict)
