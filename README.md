@@ -184,9 +184,9 @@ Pushing a tag like `v1.2.3` runs `.github/workflows/release.yml`, which:
   archives only.
 
 ```bash
-docker pull ghcr.io/t1bur1an/pgtrace-agent:0.2.2
+docker pull ghcr.io/t1bur1an/pgtrace-agent:0.3.0
 docker run --rm --privileged --pid host -v /sys/kernel/tracing:/sys/kernel/tracing \
-  ghcr.io/t1bur1an/pgtrace-agent:0.2.2 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
+  ghcr.io/t1bur1an/pgtrace-agent:0.3.0 -otlp-endpoint http://victoriatraces:10428/insert/opentelemetry/v1/traces
 ```
 
 The body of the annotated tag's message (everything after its first line)
