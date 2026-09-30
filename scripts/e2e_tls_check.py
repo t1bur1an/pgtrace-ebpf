@@ -101,7 +101,8 @@ elif args.mode == "preexisting":
     linked = count(f'{ROOT} "span_attr:pgtrace.correlation":exact')
     check("queries of sessions opened before the agent are traced", roots > 1000, f"{roots}")
     check("…and marked TLS", tls_roots == roots, f"{tls_roots}/{roots}")
-    check("…and ≥ 99% linked exactly", linked >= 0.99 * roots, f"{linked}/{roots}")
+    by_corr = {r.get("span_attr:pgtrace.correlation", ""): r["n"] for r in logsql(f'{ROOT} | stats by ("span_attr:pgtrace.correlation") count() n')}
+    check("…and ≥ 99% linked exactly", linked >= 0.99 * roots, f"{linked}/{roots}; by correlation: {by_corr}")
     check("fallback attached at startup", prom("max_over_time(pgtrace_tls_fallback_attached[10m])") == 1)
     check("fallback detached after the load ended", val(r"^pgtrace_tls_fallback_attached") == 0)
     print(f"INFO  socket-less events: {resolved:.0f} resolved, {dropped:.0f} dropped (calls of old sessions before the fallback attached)")
