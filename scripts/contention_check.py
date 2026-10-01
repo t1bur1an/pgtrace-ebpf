@@ -4,6 +4,7 @@ like in VictoriaTraces spans and agent metrics."""
 import json
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -122,23 +123,39 @@ check("metric: idle-in-transaction histogram observed a ≥ 5 s gap",
       val(r"^pgtrace_idle_in_transaction_seconds_sum") >= 4.5)
 check("metric: pool wait histogram has multi-second observations", val(r'^pgtrace_pool_wait_seconds_bucket\{le="\+Inf"\}') - val(r'^pgtrace_pool_wait_seconds_bucket\{le="1.953125"\}') >= 1)
 
-# Grafana contention row: every panel query returns data
+# Grafana contention row: every panel query returns data. rate() panels need
+# two Prometheus samples of a series; a counter first incremented by the last
+# scenario (rejected logins) may have only one right after the run, so the
+# queries are retried for up to a minute before a panel counts as empty.
 dash = json.loads(urllib.request.urlopen("http://localhost:3000/api/dashboards/uid/pgtrace").read())["dashboard"]
-row, empty = False, []
-for p in dash["panels"]:
-    if p["type"] == "row":
-        row = p["title"] == "Contention"
-        continue
-    if not row:
-        continue
-    for t in p["targets"]:
-        body = {"queries": [dict(t, datasource=p["datasource"], intervalMs=5000, maxDataPoints=100)], "from": "now-10m", "to": "now"}
-        req = urllib.request.Request("http://localhost:3000/api/ds/query", json.dumps(body).encode(), {"Content-Type": "application/json"})
-        res = json.load(urllib.request.urlopen(req))["results"][t["refId"]]
-        rows = sum(len(fr["data"]["values"][0]) if fr.get("data", {}).get("values") else 0 for fr in res.get("frames", []))
-        if res.get("error") or rows == 0:
-            empty.append(f'{p["title"]} / {t.get("legendFormat") or t.get("queryType")}')
-check("dashboard Contention row: every query returns data", not empty, "; ".join(empty))
+
+
+def empty_panels():
+    row, empty = False, []
+    for p in dash["panels"]:
+        if p["type"] == "row":
+            row = p["title"] == "Contention"
+            continue
+        if not row:
+            continue
+        for t in p["targets"]:
+            body = {"queries": [dict(t, datasource=p["datasource"], intervalMs=5000, maxDataPoints=100)], "from": "now-10m", "to": "now"}
+            req = urllib.request.Request("http://localhost:3000/api/ds/query", json.dumps(body).encode(), {"Content-Type": "application/json"})
+            res = json.load(urllib.request.urlopen(req))["results"][t["refId"]]
+            rows = sum(len(fr["data"]["values"][0]) if fr.get("data", {}).get("values") else 0 for fr in res.get("frames", []))
+            if res.get("error") or rows == 0:
+                empty.append(f'{p["title"]} / {t.get("legendFormat") or t.get("queryType")}')
+    return empty
+
+
+waited = 0
+empty = empty_panels()
+while empty and waited < 60:
+    time.sleep(5)
+    waited += 5
+    empty = empty_panels()
+check("dashboard Contention row: every query returns data", not empty,
+      "; ".join(empty) if empty else (f"after {waited} s" if waited else ""))
 
 print("CONTENTION PASSED" if failures == 0 else f"CONTENTION FAILED ({failures} checks)")
 sys.exit(1 if failures else 0)
